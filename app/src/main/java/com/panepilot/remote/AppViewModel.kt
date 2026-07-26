@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.panepilot.remote.data.AttentionPreferenceStore
+import com.panepilot.remote.data.BackgroundMonitorStore
 import com.panepilot.remote.data.CredentialStore
 import com.panepilot.remote.data.ProfileStore
 import com.panepilot.remote.model.AuthMode
@@ -15,6 +16,7 @@ import com.panepilot.remote.model.RemoteFileEntry
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
+import com.panepilot.remote.monitoring.AgentMonitorService
 import com.panepilot.remote.notifications.AttentionNotifier
 import com.panepilot.remote.notifications.newlyAttentionRequired
 import com.panepilot.remote.ssh.RemoteFileGateway
@@ -83,6 +85,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = ProfileStore(application)
     private val credentialStore = CredentialStore(application)
     private val attentionPreferences = AttentionPreferenceStore(application)
+    private val backgroundMonitorStore = BackgroundMonitorStore(application)
     private val attentionNotifier = AttentionNotifier(application)
     private val pendingTrust = AtomicReference<PendingTrust?>(null)
     private val ssh = SshConnection(application, profileStore, ::awaitHostKeyDecision)
@@ -96,6 +99,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var fileLoading: Job? = null
     private var consoleFailureReported = false
     private var lastSessionStates: Map<String, SessionState> = emptyMap()
+    private var activeConnectionSecret: ConnectionSecret? = null
+
+    init {
+        restoreBackgroundConnection()
+    }
 
     fun addServer() {
         _state.update { it.copy(screen = AppScreen.EditServer(null), error = null) }
@@ -127,6 +135,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     profileStore.save(normalized, selectedKey)
                 }
             }.onSuccess { profiles ->
+                AgentMonitorService.stop(getApplication(), normalized.id)
                 if (normalized.authMode != AuthMode.PASSWORD) {
                     credentialStore.remove(normalized.id)
                 }
@@ -143,6 +152,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteServer(profileId: String) {
         viewModelScope.launch {
+            AgentMonitorService.stop(getApplication(), profileId)
             val profiles = withContext(Dispatchers.IO) {
                 credentialStore.remove(profileId)
                 profileStore.delete(profileId)
@@ -192,13 +202,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     sessions
                 }
             }.onSuccess { sessions ->
+                activeConnectionSecret = secret
                 lastSessionStates = sessions.associate { it.terminalId to it.state }
+                val notificationTerminalIds =
+                    attentionPreferences.enabledTerminalIds(profile.id)
                 _state.update {
                     it.copy(
                         connectedProfile = profile,
                         sessions = sessions,
-                        attentionNotificationTerminalIds =
-                            attentionPreferences.enabledTerminalIds(profile.id),
+                        attentionNotificationTerminalIds = notificationTerminalIds,
                         screen = AppScreen.Sessions,
                         isBusy = false,
                         composer = "",
@@ -206,8 +218,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         notice = null
                     )
                 }
+                AgentMonitorService.start(getApplication(), profile.id, secret)
                 startSessionPolling()
             }.onFailure { error ->
+                activeConnectionSecret = null
                 ssh.disconnect()
                 finishWithError(error)
             }
@@ -215,6 +229,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        _state.value.connectedProfile?.id?.let { profileId ->
+            AgentMonitorService.stop(getApplication(), profileId)
+        }
+        activeConnectionSecret = null
         consolePolling?.cancel()
         consolePolling = null
         sessionPolling?.cancel()
@@ -419,6 +437,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         } else if (!enabled) {
             attentionNotifier.cancel(profile.id, terminalId)
         }
+        val secret = activeConnectionSecret ?: when (profile.authMode) {
+            AuthMode.PASSWORD -> credentialStore.password(profile.id)?.let {
+                ConnectionSecret(password = it)
+            }
+
+            AuthMode.PRIVATE_KEY -> ConnectionSecret()
+        }
+        if (secret != null) {
+            AgentMonitorService.start(getApplication(), profile.id, secret)
+        } else {
+            showError(
+                "Reconnect with Remember on this phone to keep alerts running in the background."
+            )
+        }
     }
 
     fun notificationPermissionDenied() {
@@ -539,6 +571,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun forgetPassword(profileId: String) {
         credentialStore.remove(profileId)
+        AgentMonitorService.stop(getApplication(), profileId)
     }
 
     override fun onCleared() {
@@ -546,8 +579,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         consolePolling?.cancel()
         sessionPolling?.cancel()
         fileLoading?.cancel()
+        activeConnectionSecret = null
         ssh.disconnect()
         super.onCleared()
+    }
+
+    private fun restoreBackgroundConnection() {
+        val profileId = backgroundMonitorStore.activeProfileId() ?: return
+        val profile = profile(profileId) ?: return
+        val secret = AgentMonitorService.connectionSecretFor(profileId) ?: when (profile.authMode) {
+            AuthMode.PASSWORD -> credentialStore.password(profileId)?.let {
+                ConnectionSecret(password = it)
+            }
+
+            AuthMode.PRIVATE_KEY -> ConnectionSecret()
+        } ?: return
+        connect(
+            profileId = profileId,
+            secret = secret,
+            rememberPassword =
+                profile.authMode == AuthMode.PASSWORD &&
+                    credentialStore.password(profileId) != null
+        )
     }
 
     private fun loadRemoteDirectory(relativePath: String) {
@@ -615,7 +668,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val current = _state.value
         val profile = current.connectedProfile
         if (detectTransitions && profile != null) {
-            val enabledIds = current.attentionNotificationTerminalIds
+            val enabledIds = attentionPreferences.enabledTerminalIds(profile.id)
             newlyAttentionRequired(lastSessionStates, sessions)
                 .filter { it.terminalId in enabledIds }
                 .forEach { attentionNotifier.show(profile, it) }
@@ -635,7 +688,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             state.copy(
                 sessions = sessions,
                 selectedSession = selected,
-                paneTitle = selected?.paneTitle ?: state.paneTitle
+                paneTitle = selected?.paneTitle ?: state.paneTitle,
+                attentionNotificationTerminalIds = profile?.let {
+                    attentionPreferences.enabledTerminalIds(it.id)
+                }.orEmpty()
             )
         }
     }

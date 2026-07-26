@@ -59,6 +59,7 @@ class AttentionNotifier(private val context: Context) {
             .setStyle(Notification.BigTextStyle().bigText(detail))
             .setCategory(Notification.CATEGORY_STATUS)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setContentIntent(openApp)
             .build()
         runCatching {

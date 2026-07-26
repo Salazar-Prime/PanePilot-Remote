@@ -745,6 +745,19 @@ private fun SessionDrawerContent(
             letterSpacing = 0.8.sp,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
         )
+        Text(
+            when (notificationTerminalIds.size) {
+                0 -> "BACKGROUND SSH · ACTIVE"
+                1 -> "BACKGROUND ALERTS · 1 TERMINAL"
+                else -> "BACKGROUND ALERTS · ${notificationTerminalIds.size} TERMINALS"
+            },
+            color = if (notificationTerminalIds.isEmpty()) Success else Attention,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+        )
         if (sessions.isEmpty() && !isRefreshing) {
             Box(
                 modifier = Modifier

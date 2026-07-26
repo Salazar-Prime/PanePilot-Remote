@@ -90,7 +90,28 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                BackHandler(enabled = state.screen != AppScreen.Servers) {
+                LaunchedEffect(state.connectedProfile?.id) {
+                    if (
+                        state.connectedProfile != null &&
+                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        notificationPermissionLauncher.launch(
+                            Manifest.permission.POST_NOTIFICATIONS
+                        )
+                    }
+                }
+
+                BackHandler(enabled = state.screen == AppScreen.Sessions) {
+                    moveTaskToBack(true)
+                }
+
+                BackHandler(
+                    enabled =
+                        state.screen != AppScreen.Servers &&
+                            state.screen != AppScreen.Sessions
+                ) {
                     appViewModel.goBack()
                 }
 
