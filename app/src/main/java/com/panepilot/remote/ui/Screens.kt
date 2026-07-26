@@ -39,11 +39,17 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -56,6 +62,7 @@ import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -89,11 +96,13 @@ import com.panepilot.remote.HostKeyPrompt
 import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
+import com.panepilot.remote.model.RemoteFileEntry
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.util.Locale
 import java.util.UUID
 
 @Composable
@@ -617,7 +626,10 @@ fun SessionWorkspaceScreen(
     onOpenSession: (String) -> Unit,
     onComposerChange: (String) -> Unit,
     onSend: () -> Unit,
-    onTerminalKey: (TerminalKey) -> Unit
+    onTerminalKey: (TerminalKey) -> Unit,
+    notificationTerminalIds: Set<String>,
+    onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
+    onBrowseFiles: () -> Unit
 ) {
     val drawerState = rememberDrawerState(
         initialValue = if (selectedSession == null) DrawerValue.Open else DrawerValue.Closed
@@ -645,6 +657,8 @@ fun SessionWorkspaceScreen(
                     isRefreshing = isRefreshing,
                     onRefresh = onRefresh,
                     onDisconnect = onDisconnect,
+                    notificationTerminalIds = notificationTerminalIds,
+                    onToggleNotifications = onToggleNotifications,
                     onOpenSession = { sessionName ->
                         onOpenSession(sessionName)
                         scope.launch { drawerState.close() }
@@ -666,6 +680,7 @@ fun SessionWorkspaceScreen(
                 composer = composer,
                 isSending = isSending,
                 onShowSessions = { scope.launch { drawerState.open() } },
+                onBrowseFiles = onBrowseFiles,
                 onComposerChange = onComposerChange,
                 onSend = onSend,
                 onTerminalKey = onTerminalKey
@@ -683,6 +698,8 @@ private fun SessionDrawerContent(
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onDisconnect: () -> Unit,
+    notificationTerminalIds: Set<String>,
+    onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
     onOpenSession: (String) -> Unit
 ) {
     Column(
@@ -780,6 +797,11 @@ private fun SessionDrawerContent(
                         SessionCard(
                             session = session,
                             selected = session.terminalId == selectedSession?.terminalId,
+                            notificationsEnabled =
+                                session.terminalId in notificationTerminalIds,
+                            onToggleNotifications = {
+                                onToggleNotifications(session.terminalId, it)
+                            },
                             onClick = { onOpenSession(session.name) }
                         )
                     }
@@ -851,6 +873,8 @@ private fun EmptySessionWorkspace(
 private fun SessionCard(
     session: PanePilotSession,
     selected: Boolean,
+    notificationsEnabled: Boolean,
+    onToggleNotifications: (Boolean) -> Unit,
     onClick: () -> Unit
 ) {
     val stateColor = stateColor(session.state)
@@ -893,6 +917,29 @@ private fun SessionCard(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
                     )
+                    if (session.profile == "codex" || session.profile == "claude") {
+                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = { onToggleNotifications(!notificationsEnabled) },
+                            enabled = !session.paneDead,
+                            modifier = Modifier.size(34.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (notificationsEnabled) {
+                                    Icons.Default.Notifications
+                                } else {
+                                    Icons.Default.NotificationsOff
+                                },
+                                contentDescription = if (notificationsEnabled) {
+                                    "Disable attention notifications for ${session.name}"
+                                } else {
+                                    "Enable attention notifications for ${session.name}"
+                                },
+                                tint = if (notificationsEnabled) Attention else Muted,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
@@ -934,6 +981,7 @@ fun SessionConsoleScreen(
     composer: String,
     isSending: Boolean,
     onShowSessions: () -> Unit,
+    onBrowseFiles: () -> Unit,
     onComposerChange: (String) -> Unit,
     onSend: () -> Unit,
     onTerminalKey: (TerminalKey) -> Unit
@@ -956,7 +1004,8 @@ fun SessionConsoleScreen(
         SessionWorkspaceHeader(
             title = session?.name ?: "Session",
             onShowSessions = onShowSessions,
-            subtitle = paneTitle.takeIf { it.isNotBlank() }
+            subtitle = paneTitle.takeIf { it.isNotBlank() },
+            onBrowseFiles = onBrowseFiles
         )
         Row(
             modifier = Modifier
@@ -1126,10 +1175,223 @@ private fun TerminalKeyBar(
 }
 
 @Composable
+fun RemoteFilesScreen(
+    projectName: String,
+    rootPath: String,
+    relativePath: String,
+    files: List<RemoteFileEntry>,
+    isLoading: Boolean,
+    isDownloading: Boolean,
+    downloadProgress: Int?,
+    onBack: () -> Unit,
+    onUp: () -> Unit,
+    onOpenDirectory: (String) -> Unit,
+    onDownload: (RemoteFileEntry) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        BackHeader(
+            title = projectName.ifBlank { "Project files" },
+            subtitle = "REMOTE FILES",
+            onBack = onBack
+        )
+        Surface(
+            color = Slate,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(start = 14.dp, top = 10.dp, bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (relativePath.isEmpty()) "PROJECT ROOT" else "REMOTE FOLDER",
+                        color = Sky,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.1.sp
+                    )
+                    Text(
+                        if (relativePath.isEmpty()) rootPath else "$rootPath/$relativePath",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (relativePath.isNotEmpty()) {
+                    IconButton(onClick = onUp, enabled = !isLoading && !isDownloading) {
+                        Icon(Icons.Default.ArrowUpward, contentDescription = "Up one folder")
+                    }
+                }
+            }
+        }
+        Box(modifier = Modifier.weight(1f)) {
+            when {
+                isLoading && files.isEmpty() -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center),
+                        strokeWidth = 2.dp
+                    )
+                }
+
+                files.isEmpty() -> {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = Muted,
+                            modifier = Modifier.size(34.dp)
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "This folder is empty",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 16.dp,
+                            end = 16.dp,
+                            top = 8.dp,
+                            bottom = 24.dp
+                        )
+                    ) {
+                        items(files, key = { it.relativePath }) { file ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        enabled = !isLoading && !isDownloading
+                                    ) {
+                                        if (file.isDirectory) {
+                                            onOpenDirectory(file.relativePath)
+                                        } else {
+                                            onDownload(file)
+                                        }
+                                    }
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    color = if (file.isDirectory) {
+                                        PilotBlue.copy(alpha = 0.18f)
+                                    } else {
+                                        Slate
+                                    },
+                                    shape = RoundedCornerShape(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = if (file.isDirectory) {
+                                            Icons.Default.Folder
+                                        } else {
+                                            Icons.AutoMirrored.Filled.InsertDriveFile
+                                        },
+                                        contentDescription = null,
+                                        tint = if (file.isDirectory) Sky else Muted,
+                                        modifier = Modifier.padding(10.dp)
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        file.name,
+                                        fontWeight = FontWeight.Medium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        if (file.isDirectory) {
+                                            "Folder"
+                                        } else {
+                                            formatFileSize(file.sizeBytes)
+                                        },
+                                        color = Muted,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp
+                                    )
+                                }
+                                if (!file.isDirectory) {
+                                    Icon(
+                                        Icons.Default.Download,
+                                        contentDescription = "Download ${file.name}",
+                                        tint = Sky,
+                                        modifier = Modifier.padding(8.dp)
+                                    )
+                                }
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+                    }
+                    if (isLoading) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+        }
+        if (isDownloading) {
+            Surface(
+                color = SlateRaised,
+                tonalElevation = 4.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Saving to this phone",
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        downloadProgress?.let {
+                            Text(
+                                "$it%",
+                                color = Sky,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    if (downloadProgress == null) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { downloadProgress / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SessionWorkspaceHeader(
     title: String,
     subtitle: String?,
-    onShowSessions: () -> Unit
+    onShowSessions: () -> Unit,
+    onBrowseFiles: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -1157,6 +1419,11 @@ private fun SessionWorkspaceHeader(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+            }
+        }
+        onBrowseFiles?.let { browse ->
+            IconButton(onClick = browse) {
+                Icon(Icons.Default.Folder, contentDescription = "Browse project files")
             }
         }
     }
@@ -1326,6 +1593,20 @@ private fun stateLabel(state: SessionState): String = when (state) {
     SessionState.IDLE -> "IDLE"
     SessionState.LIVE -> "LIVE"
     SessionState.STOPPED -> "STOPPED"
+}
+
+private fun formatFileSize(bytes: Long): String {
+    val safeBytes = bytes.coerceAtLeast(0L)
+    if (safeBytes < 1_024L) return "$safeBytes B"
+    val units = arrayOf("KB", "MB", "GB", "TB")
+    var value = safeBytes.toDouble()
+    var unit = -1
+    do {
+        value /= 1_024.0
+        unit += 1
+    } while (value >= 1_024.0 && unit < units.lastIndex)
+    val precision = if (value >= 10.0) 0 else 1
+    return String.format(Locale.getDefault(), "%.${precision}f %s", value, units[unit])
 }
 
 private fun Context.displayName(uri: Uri): String? {

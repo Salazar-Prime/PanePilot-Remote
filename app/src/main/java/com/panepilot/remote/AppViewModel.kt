@@ -4,13 +4,20 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.panepilot.remote.data.AttentionPreferenceStore
 import com.panepilot.remote.data.CredentialStore
 import com.panepilot.remote.data.ProfileStore
 import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
+import com.panepilot.remote.model.RemoteDownloadRequest
+import com.panepilot.remote.model.RemoteFileEntry
 import com.panepilot.remote.model.ServerProfile
+import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
+import com.panepilot.remote.notifications.AttentionNotifier
+import com.panepilot.remote.notifications.newlyAttentionRequired
+import com.panepilot.remote.ssh.RemoteFileGateway
 import com.panepilot.remote.ssh.SshConnection
 import com.panepilot.remote.ssh.TmuxGateway
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +40,7 @@ sealed interface AppScreen {
     data class Credentials(val profileId: String) : AppScreen
     data object Sessions : AppScreen
     data class Console(val sessionName: String) : AppScreen
+    data class Files(val sessionName: String) : AppScreen
 }
 
 data class HostKeyPrompt(
@@ -51,7 +59,16 @@ data class AppUiState(
     val composer: String = "",
     val isBusy: Boolean = false,
     val isSending: Boolean = false,
+    val attentionNotificationTerminalIds: Set<String> = emptySet(),
+    val remoteFileRoot: String = "",
+    val remoteFilePath: String = "",
+    val remoteFiles: List<RemoteFileEntry> = emptyList(),
+    val isLoadingFiles: Boolean = false,
+    val pendingDownload: RemoteDownloadRequest? = null,
+    val isDownloading: Boolean = false,
+    val downloadProgress: Int? = null,
     val hostKeyPrompt: HostKeyPrompt? = null,
+    val notice: String? = null,
     val error: String? = null
 )
 
@@ -64,14 +81,20 @@ private data class PendingTrust(
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = ProfileStore(application)
     private val credentialStore = CredentialStore(application)
+    private val attentionPreferences = AttentionPreferenceStore(application)
+    private val attentionNotifier = AttentionNotifier(application)
     private val pendingTrust = AtomicReference<PendingTrust?>(null)
     private val ssh = SshConnection(application, profileStore, ::awaitHostKeyDecision)
     private val tmux = TmuxGateway(ssh)
+    private val remoteFiles = RemoteFileGateway(ssh)
     private val _state = MutableStateFlow(AppUiState(profiles = profileStore.load()))
     val state: StateFlow<AppUiState> = _state.asStateFlow()
 
     private var consolePolling: Job? = null
+    private var sessionPolling: Job? = null
+    private var fileLoading: Job? = null
     private var consoleFailureReported = false
+    private var lastSessionStates: Map<String, SessionState> = emptyMap()
 
     fun addServer() {
         _state.update { it.copy(screen = AppScreen.EditServer(null), error = null) }
@@ -123,6 +146,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 credentialStore.remove(profileId)
                 profileStore.delete(profileId)
             }
+            val notificationIds = attentionPreferences.enabledTerminalIds(profileId)
+            attentionNotifier.cancelProfile(profileId, notificationIds)
+            attentionPreferences.removeProfile(profileId)
             _state.update {
                 it.copy(profiles = profiles, screen = AppScreen.Servers, error = null)
             }
@@ -165,16 +191,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     sessions
                 }
             }.onSuccess { sessions ->
+                lastSessionStates = sessions.associate { it.terminalId to it.state }
                 _state.update {
                     it.copy(
                         connectedProfile = profile,
                         sessions = sessions,
+                        attentionNotificationTerminalIds =
+                            attentionPreferences.enabledTerminalIds(profile.id),
                         screen = AppScreen.Sessions,
                         isBusy = false,
                         composer = "",
-                        transcript = ""
+                        transcript = "",
+                        notice = null
                     )
                 }
+                startSessionPolling()
             }.onFailure { error ->
                 ssh.disconnect()
                 finishWithError(error)
@@ -185,6 +216,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         consolePolling?.cancel()
         consolePolling = null
+        sessionPolling?.cancel()
+        sessionPolling = null
+        fileLoading?.cancel()
+        fileLoading = null
+        lastSessionStates = emptyMap()
         ssh.disconnect()
         tmux.reset()
         _state.update {
@@ -197,6 +233,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 composer = "",
                 isBusy = false,
                 isSending = false,
+                attentionNotificationTerminalIds = emptySet(),
+                remoteFileRoot = "",
+                remoteFilePath = "",
+                remoteFiles = emptyList(),
+                isLoadingFiles = false,
+                pendingDownload = null,
+                isDownloading = false,
+                downloadProgress = null,
                 screen = AppScreen.Servers
             )
         }
@@ -209,7 +253,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runCatching {
                 withContext(Dispatchers.IO) { tmux.listSessions() }
             }.onSuccess { sessions ->
-                _state.update { it.copy(sessions = sessions, isBusy = false) }
+                applySessionScan(sessions, detectTransitions = true)
+                _state.update { it.copy(isBusy = false) }
             }.onFailure(::finishWithError)
         }
     }
@@ -227,6 +272,112 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         startConsolePolling(sessionName)
+    }
+
+    fun openFiles() {
+        val session = _state.value.selectedSession ?: return
+        consolePolling?.cancel()
+        consolePolling = null
+        _state.update {
+            it.copy(
+                screen = AppScreen.Files(session.name),
+                remoteFileRoot = session.projectPath,
+                remoteFilePath = "",
+                remoteFiles = emptyList(),
+                pendingDownload = null,
+                error = null
+            )
+        }
+        loadRemoteDirectory("")
+    }
+
+    fun openRemoteDirectory(relativePath: String) {
+        loadRemoteDirectory(relativePath)
+    }
+
+    fun goUpRemoteDirectory() {
+        val parent = RemoteFileGateway.parentPath(_state.value.remoteFilePath)
+        loadRemoteDirectory(parent)
+    }
+
+    fun requestDownload(file: RemoteFileEntry) {
+        if (file.isDirectory || _state.value.isDownloading) return
+        _state.update { it.copy(pendingDownload = RemoteDownloadRequest(file = file)) }
+    }
+
+    fun finishDownloadDestination(uri: Uri?) {
+        val request = _state.value.pendingDownload ?: return
+        if (uri == null) {
+            _state.update { it.copy(pendingDownload = null) }
+            return
+        }
+        val root = _state.value.remoteFileRoot
+        _state.update {
+            it.copy(
+                pendingDownload = null,
+                isDownloading = true,
+                downloadProgress = 0,
+                error = null
+            )
+        }
+        viewModelScope.launch {
+            var lastProgress = -1
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    resolver.openOutputStream(uri, "w")?.use { output ->
+                        remoteFiles.download(
+                            rootPath = root,
+                            relativePath = request.file.relativePath,
+                            output = output
+                        ) { copied, total ->
+                            val progress = when {
+                                total <= 0L && copied <= 0L -> 100
+                                total <= 0L -> null
+                                else -> ((copied * 100L) / total)
+                                    .coerceIn(0L, 100L)
+                                    .toInt()
+                            }
+                            if (progress != null && progress != lastProgress) {
+                                lastProgress = progress
+                                _state.update { it.copy(downloadProgress = progress) }
+                            }
+                        }
+                    } ?: throw IllegalStateException("The selected destination could not be opened.")
+                }
+            }.onSuccess {
+                _state.update {
+                    it.copy(
+                        isDownloading = false,
+                        downloadProgress = null,
+                        notice = "Saved ${request.file.name}."
+                    )
+                }
+            }.onFailure { error ->
+                runCatching { getApplication<Application>().contentResolver.delete(uri, null, null) }
+                _state.update {
+                    it.copy(isDownloading = false, downloadProgress = null)
+                }
+                finishWithError(error)
+            }
+        }
+    }
+
+    fun setAttentionNotificationsEnabled(terminalId: String, enabled: Boolean) {
+        val current = _state.value
+        val profile = current.connectedProfile ?: return
+        val session = current.sessions.firstOrNull { it.terminalId == terminalId } ?: return
+        val updated = attentionPreferences.setEnabled(profile.id, terminalId, enabled)
+        _state.update { it.copy(attentionNotificationTerminalIds = updated) }
+        if (enabled && session.state == SessionState.NEEDS_INPUT) {
+            attentionNotifier.show(profile, session)
+        } else if (!enabled) {
+            attentionNotifier.cancel(profile.id, terminalId)
+        }
+    }
+
+    fun notificationPermissionDenied() {
+        showError("Allow PanePilot notifications to enable alerts for this terminal.")
     }
 
     fun updateComposer(value: String) {
@@ -279,6 +430,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(error = null) }
     }
 
+    fun clearNotice() {
+        _state.update { it.copy(notice = null) }
+    }
+
     fun goBack() {
         when (_state.value.screen) {
             AppScreen.Servers -> Unit
@@ -300,6 +455,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshSessions()
             }
+
+            is AppScreen.Files -> {
+                if (_state.value.isDownloading) {
+                    showError("Wait for the current file download to finish.")
+                    return
+                }
+                val sessionName = (_state.value.screen as AppScreen.Files).sessionName
+                fileLoading?.cancel()
+                fileLoading = null
+                _state.update {
+                    it.copy(
+                        screen = AppScreen.Console(sessionName),
+                        remoteFileRoot = "",
+                        remoteFilePath = "",
+                        remoteFiles = emptyList(),
+                        isLoadingFiles = false,
+                        pendingDownload = null,
+                        error = null
+                    )
+                }
+                startConsolePolling(sessionName)
+            }
         }
     }
 
@@ -316,8 +493,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         pendingTrust.getAndSet(null)?.latch?.countDown()
+        consolePolling?.cancel()
+        sessionPolling?.cancel()
+        fileLoading?.cancel()
         ssh.disconnect()
         super.onCleared()
+    }
+
+    private fun loadRemoteDirectory(relativePath: String) {
+        if (!ssh.isConnected || _state.value.isLoadingFiles) return
+        val root = _state.value.remoteFileRoot
+        fileLoading = viewModelScope.launch {
+            _state.update { it.copy(isLoadingFiles = true, error = null) }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    remoteFiles.list(root, relativePath)
+                }
+            }.onSuccess { files ->
+                _state.update {
+                    it.copy(
+                        remoteFilePath = RemoteFileGateway.normalizeRelativePath(relativePath),
+                        remoteFiles = files,
+                        isLoadingFiles = false
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(isLoadingFiles = false) }
+                finishWithError(error)
+            }
+        }
     }
 
     private fun startConsolePolling(sessionName: String) {
@@ -328,6 +532,55 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 refreshConsole(sessionName, reportError = true)
                 delay(2_000)
             }
+        }
+    }
+
+    private fun startSessionPolling() {
+        sessionPolling?.cancel()
+        sessionPolling = viewModelScope.launch {
+            delay(SESSION_POLL_INTERVAL_MS)
+            while (ssh.isConnected && _state.value.connectedProfile != null) {
+                if (!_state.value.isBusy && !_state.value.isDownloading) {
+                    runCatching {
+                        withContext(Dispatchers.IO) { tmux.listSessions() }
+                    }.onSuccess { sessions ->
+                        applySessionScan(sessions, detectTransitions = true)
+                    }
+                }
+                delay(SESSION_POLL_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun applySessionScan(
+        sessions: List<PanePilotSession>,
+        detectTransitions: Boolean
+    ) {
+        val current = _state.value
+        val profile = current.connectedProfile
+        if (detectTransitions && profile != null) {
+            val enabledIds = current.attentionNotificationTerminalIds
+            newlyAttentionRequired(lastSessionStates, sessions)
+                .filter { it.terminalId in enabledIds }
+                .forEach { attentionNotifier.show(profile, it) }
+            sessions
+                .filter {
+                    lastSessionStates[it.terminalId] == SessionState.NEEDS_INPUT &&
+                        it.state != SessionState.NEEDS_INPUT
+                }
+                .forEach { attentionNotifier.cancel(profile.id, it.terminalId) }
+        }
+        lastSessionStates = sessions.associate { it.terminalId to it.state }
+        _state.update { state ->
+            val selected = state.selectedSession?.let { selectedSession ->
+                sessions.firstOrNull { it.terminalId == selectedSession.terminalId }
+                    ?: selectedSession
+            }
+            state.copy(
+                sessions = sessions,
+                selectedSession = selected,
+                paneTitle = selected?.paneTitle ?: state.paneTitle
+            )
         }
     }
 
@@ -349,6 +602,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 current.copy(
                     selectedSession = updated,
+                    sessions = if (updated == null) {
+                        current.sessions
+                    } else {
+                        current.sessions.map { session ->
+                            if (session.terminalId == updated.terminalId) updated else session
+                        }
+                    },
                     paneTitle = snapshot.paneTitle,
                     transcript = snapshot.transcript
                 )
@@ -409,7 +669,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun finishWithError(error: Throwable) {
-        _state.update { it.copy(isBusy = false, isSending = false, error = messageFor(error)) }
+        _state.update {
+            it.copy(
+                isBusy = false,
+                isSending = false,
+                isLoadingFiles = false,
+                isDownloading = false,
+                downloadProgress = null,
+                error = messageFor(error)
+            )
+        }
     }
 
     private fun showError(message: String) {
@@ -418,4 +687,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun messageFor(error: Throwable): String =
         error.message?.takeIf { it.isNotBlank() } ?: "Something went wrong."
+
+    private companion object {
+        const val SESSION_POLL_INTERVAL_MS = 6_000L
+    }
 }

@@ -1,11 +1,16 @@
 package com.panepilot.remote
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -15,13 +20,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.panepilot.remote.ui.CredentialsScreen
 import com.panepilot.remote.ui.HostKeyDialog
 import com.panepilot.remote.ui.PanePilotTheme
+import com.panepilot.remote.ui.RemoteFilesScreen
 import com.panepilot.remote.ui.ServerEditorScreen
 import com.panepilot.remote.ui.ServerListScreen
 import com.panepilot.remote.ui.SessionWorkspaceScreen
@@ -39,11 +47,44 @@ class MainActivity : ComponentActivity() {
                 val appViewModel: AppViewModel = viewModel()
                 val state by appViewModel.state.collectAsStateWithLifecycle()
                 val snackbar = remember { SnackbarHostState() }
+                var pendingNotificationTerminalId by remember {
+                    mutableStateOf<String?>(null)
+                }
+                val notificationPermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    pendingNotificationTerminalId?.let { terminalId ->
+                        if (granted) {
+                            appViewModel.setAttentionNotificationsEnabled(terminalId, true)
+                        } else {
+                            appViewModel.notificationPermissionDenied()
+                        }
+                    }
+                    pendingNotificationTerminalId = null
+                }
+                val downloadDestinationLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("*/*")
+                ) { destination ->
+                    appViewModel.finishDownloadDestination(destination)
+                }
 
                 LaunchedEffect(state.error) {
                     state.error?.let {
                         snackbar.showSnackbar(it)
                         appViewModel.clearError()
+                    }
+                }
+
+                LaunchedEffect(state.notice) {
+                    state.notice?.let {
+                        snackbar.showSnackbar(it)
+                        appViewModel.clearNotice()
+                    }
+                }
+
+                LaunchedEffect(state.pendingDownload?.id) {
+                    state.pendingDownload?.let { request ->
+                        downloadDestinationLauncher.launch(request.file.name)
                     }
                 }
 
@@ -121,7 +162,46 @@ class MainActivity : ComponentActivity() {
                                 onOpenSession = appViewModel::openConsole,
                                 onComposerChange = appViewModel::updateComposer,
                                 onSend = appViewModel::sendMessage,
-                                onTerminalKey = appViewModel::sendTerminalKey
+                                onTerminalKey = appViewModel::sendTerminalKey,
+                                notificationTerminalIds =
+                                    state.attentionNotificationTerminalIds,
+                                onToggleNotifications = { terminalId, enabled ->
+                                    if (!enabled) {
+                                        appViewModel.setAttentionNotificationsEnabled(
+                                            terminalId,
+                                            false
+                                        )
+                                    } else if (
+                                        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) ==
+                                        PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        appViewModel.setAttentionNotificationsEnabled(
+                                            terminalId,
+                                            true
+                                        )
+                                    } else {
+                                        pendingNotificationTerminalId = terminalId
+                                        notificationPermissionLauncher.launch(
+                                            Manifest.permission.POST_NOTIFICATIONS
+                                        )
+                                    }
+                                },
+                                onBrowseFiles = appViewModel::openFiles
+                            )
+
+                            is AppScreen.Files -> RemoteFilesScreen(
+                                projectName = state.selectedSession?.projectName.orEmpty(),
+                                rootPath = state.remoteFileRoot,
+                                relativePath = state.remoteFilePath,
+                                files = state.remoteFiles,
+                                isLoading = state.isLoadingFiles,
+                                isDownloading = state.isDownloading,
+                                downloadProgress = state.downloadProgress,
+                                onBack = appViewModel::goBack,
+                                onUp = appViewModel::goUpRemoteDirectory,
+                                onOpenDirectory = appViewModel::openRemoteDirectory,
+                                onDownload = appViewModel::requestDownload
                             )
                         }
                     }

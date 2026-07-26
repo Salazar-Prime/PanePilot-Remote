@@ -3,3 +3,5 @@
 -dontwarn com.sun.jna.**
 -dontwarn org.newsclub.net.unix.**
 -dontwarn org.slf4j.**
+-dontwarn org.apache.logging.log4j.**
+-dontwarn org.ietf.jgss.**

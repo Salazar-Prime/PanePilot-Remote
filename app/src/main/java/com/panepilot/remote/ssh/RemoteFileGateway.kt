@@ -1,0 +1,152 @@
+package com.panepilot.remote.ssh
+
+import com.jcraft.jsch.ChannelSftp
+import com.jcraft.jsch.SftpProgressMonitor
+import com.panepilot.remote.model.RemoteFileEntry
+import java.io.OutputStream
+import java.util.Vector
+
+class RemoteFileGateway(private val ssh: SshConnection) {
+    fun list(rootPath: String, relativePath: String): List<RemoteFileEntry> {
+        val normalized = normalizeRelativePath(relativePath)
+        return ssh.withSftp { sftp ->
+            val root = canonicalRoot(sftp, rootPath)
+            val directory = resolveWithinRoot(sftp, root, normalized)
+            val attributes = sftp.stat(directory)
+            require(attributes.isDir) { "This remote path is not a folder." }
+
+            @Suppress("UNCHECKED_CAST")
+            val entries = sftp.ls(directory) as Vector<ChannelSftp.LsEntry>
+            entries.asSequence()
+                .filter { it.filename != "." && it.filename != ".." }
+                .filter { entry -> safeEntry(entry) }
+                .take(MAX_DIRECTORY_ENTRIES)
+                .map { entry ->
+                    val childRelativePath = joinRelative(normalized, entry.filename)
+                    RemoteFileEntry(
+                        name = entry.filename,
+                        relativePath = childRelativePath,
+                        isDirectory = entry.attrs.isDir,
+                        sizeBytes = entry.attrs.size.coerceAtLeast(0L),
+                        modifiedAtMillis = entry.attrs.mTime.toLong() * 1_000L
+                    )
+                }
+                .sortedWith(
+                    compareByDescending<RemoteFileEntry> { it.isDirectory }
+                        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+                )
+                .toList()
+        }
+    }
+
+    fun download(
+        rootPath: String,
+        relativePath: String,
+        output: OutputStream,
+        onProgress: (bytesCopied: Long, totalBytes: Long) -> Unit
+    ) {
+        val normalized = normalizeRelativePath(relativePath)
+        require(normalized.isNotEmpty()) { "Choose a remote file to download." }
+        ssh.withSftp { sftp ->
+            val root = canonicalRoot(sftp, rootPath)
+            val remoteFile = resolveWithinRoot(sftp, root, normalized)
+            val attributes = sftp.stat(remoteFile)
+            require(!attributes.isDir) { "Folders cannot be downloaded as a single file." }
+            require(!attributes.isLink) { "Symbolic links cannot be downloaded." }
+
+            val total = attributes.size.coerceAtLeast(0L)
+            onProgress(0L, total)
+            sftp.get(
+                remoteFile,
+                output,
+                object : SftpProgressMonitor {
+                    private var copied = 0L
+
+                    override fun init(
+                        op: Int,
+                        src: String?,
+                        dest: String?,
+                        max: Long
+                    ) = Unit
+
+                    override fun count(count: Long): Boolean {
+                        copied += count
+                        onProgress(copied, total)
+                        return true
+                    }
+
+                    override fun end() {
+                        onProgress(total, total)
+                    }
+                }
+            )
+            output.flush()
+        }
+    }
+
+    private fun canonicalRoot(sftp: ChannelSftp, rootPath: String): String {
+        require(rootPath.startsWith('/')) { "The project folder is not an absolute remote path." }
+        val root = sftp.realpath(rootPath).trimEnd('/').ifEmpty { "/" }
+        require(sftp.stat(root).isDir) { "The project folder is not available." }
+        return root
+    }
+
+    private fun resolveWithinRoot(
+        sftp: ChannelSftp,
+        canonicalRoot: String,
+        relativePath: String
+    ): String {
+        val unresolved = if (relativePath.isEmpty()) {
+            canonicalRoot
+        } else if (canonicalRoot == "/") {
+            "/$relativePath"
+        } else {
+            "$canonicalRoot/$relativePath"
+        }
+        val resolved = sftp.realpath(unresolved).trimEnd('/').ifEmpty { "/" }
+        require(isWithinRoot(canonicalRoot, resolved)) {
+            "The selected path leaves the project folder."
+        }
+        return resolved
+    }
+
+    private fun safeEntry(entry: ChannelSftp.LsEntry): Boolean {
+        val name = entry.filename
+        return !entry.attrs.isLink &&
+            name.isNotBlank() &&
+            name.length <= MAX_FILE_NAME_LENGTH &&
+            '/' !in name &&
+            '\u0000' !in name &&
+            name.none { it.code in 0..31 || it.code == 127 }
+    }
+
+    companion object {
+        private const val MAX_DIRECTORY_ENTRIES = 10_000
+        private const val MAX_FILE_NAME_LENGTH = 255
+
+        internal fun normalizeRelativePath(path: String): String {
+            if (path.isBlank()) return ""
+            require(!path.startsWith('/')) { "Remote file paths must stay inside the project." }
+            val segments = path.split('/')
+            require(segments.all { segment ->
+                segment.isNotBlank() &&
+                    segment != "." &&
+                    segment != ".." &&
+                    '\u0000' !in segment &&
+                    segment.none { it.code in 0..31 || it.code == 127 }
+            }) {
+                "The remote file path is invalid."
+            }
+            return segments.joinToString("/")
+        }
+
+        internal fun isWithinRoot(root: String, candidate: String): Boolean =
+            candidate == root || root == "/" || candidate.startsWith("$root/")
+
+        internal fun parentPath(path: String): String =
+            normalizeRelativePath(path).substringBeforeLast('/', "")
+
+        private fun joinRelative(parent: String, name: String): String =
+            if (parent.isEmpty()) name else "$parent/$name"
+    }
+}

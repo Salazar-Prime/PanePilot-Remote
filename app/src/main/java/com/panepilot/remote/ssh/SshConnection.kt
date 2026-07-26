@@ -3,9 +3,11 @@ package com.panepilot.remote.ssh
 import android.content.Context
 import android.os.SystemClock
 import com.jcraft.jsch.ChannelExec
+import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.SftpException
 import com.jcraft.jsch.UserInfo
 import com.panepilot.remote.data.ProfileStore
 import com.panepilot.remote.model.AuthMode
@@ -170,6 +172,27 @@ class SshConnection(
             )
         } catch (error: JSchException) {
             throw connectionError(error)
+        } finally {
+            channel.disconnect()
+        }
+    }
+
+    @Synchronized
+    internal fun <T> withSftp(block: (ChannelSftp) -> T): T {
+        val active = session?.takeIf { it.isConnected }
+            ?: throw IllegalStateException("The SSH connection is offline.")
+        val channel = active.openChannel("sftp") as ChannelSftp
+        try {
+            channel.connect(CONNECT_TIMEOUT_MS)
+            return block(channel)
+        } catch (error: JSchException) {
+            throw connectionError(error)
+        } catch (error: SftpException) {
+            throw IllegalStateException(
+                error.message?.takeIf { it.isNotBlank() }
+                    ?: "The remote file operation failed.",
+                error
+            )
         } finally {
             channel.disconnect()
         }

@@ -132,7 +132,7 @@ class TmuxGateway(private val ssh: SshConnection) {
         private val UUID_PATTERN =
             Regex("^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", RegexOption.IGNORE_CASE)
         private val ACTION_REQUIRED =
-            Regex("\\b(action required|approval required|permission required|needs input|waiting for (approval|input)|confirm to continue)\\b", RegexOption.IGNORE_CASE)
+            Regex("\\b(action required|approval required|permission required|needs (attention|input)|waiting for (approval|input)|confirm to continue)\\b", RegexOption.IGNORE_CASE)
         private val RUNNING = Regex("\\b(working|thinking)\\b", RegexOption.IGNORE_CASE)
         private val READY = Regex("\\bready\\b", RegexOption.IGNORE_CASE)
 

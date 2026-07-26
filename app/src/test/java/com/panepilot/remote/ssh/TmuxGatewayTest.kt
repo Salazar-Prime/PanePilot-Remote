@@ -78,6 +78,10 @@ class TmuxGatewayTest {
             TmuxGateway.stateFrom("Action required · approve command", "codex", false)
         )
         assertEquals(
+            SessionState.NEEDS_INPUT,
+            TmuxGateway.stateFrom("Needs attention · tool failed", "codex", false)
+        )
+        assertEquals(
             SessionState.READY,
             TmuxGateway.stateFrom("Ready · 4/4 tasks", "codex", false)
         )

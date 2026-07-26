@@ -20,6 +20,8 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Bounded, auto-refreshing pane snapshots with ANSI terminal colors
 - Multiline agent messages sent through a temporary tmux buffer
 - A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
+- Project-scoped remote file browsing with downloads through Android's system file picker
+- Per-terminal alerts when a Codex or Claude session transitions to needing input
 
 The app is a focused monitor and message composer, not a full terminal emulator. It
 does not create, rename, stop, archive, or delete sessions.
@@ -96,6 +98,10 @@ and allow installation from that file source when Android asks.
    from the server or hosting provider before choosing **Trust and connect**.
 5. Choose a live session, watch its pane snapshot, and use the bottom composer to send
    a prompt.
+6. Use the folder button in a session header to browse its remote project and save a
+   file to any location offered by Android.
+7. Open the session side pane and tap a terminal's bell to enable or disable attention
+   alerts. On Android 13 and newer, approve the notification permission the first time.
 
 If a legitimate server is rebuilt and its host key changes, edit that server and use
 **Forget saved host key** only after independently verifying the new fingerprint.
@@ -112,4 +118,8 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
   into the remote shell command.
 - Session names are always passed as exact tmux targets (`=session-name:`).
 - The transcript is capped to the most recent 300 pane lines and 768 KB per refresh.
+- File browsing is bounded to the session's project folder. Symbolic links are omitted,
+  and file bytes stream directly from SFTP into the Android destination you select.
+- Attention alerts are checked every few seconds while the SSH connection remains
+  active, including while the app is in the background unless Android stops its process.
 - Leaving the app does not stop the remote tmux session.

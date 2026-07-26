@@ -22,6 +22,19 @@ data class ConnectionSecret(
     val keyPassphrase: String = ""
 )
 
+data class RemoteFileEntry(
+    val name: String,
+    val relativePath: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val modifiedAtMillis: Long
+)
+
+data class RemoteDownloadRequest(
+    val id: String = UUID.randomUUID().toString(),
+    val file: RemoteFileEntry
+)
+
 enum class SessionState {
     NEEDS_INPUT,
     RUNNING,
