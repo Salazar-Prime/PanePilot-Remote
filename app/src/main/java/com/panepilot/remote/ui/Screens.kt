@@ -52,6 +52,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -111,6 +112,7 @@ import java.util.UUID
 @Composable
 fun ServerListScreen(
     profiles: List<ServerProfile>,
+    connectedProfileIds: Set<String>,
     onAdd: () -> Unit,
     onEdit: (String) -> Unit,
     onConnect: (String) -> Unit
@@ -145,7 +147,7 @@ fun ServerListScreen(
             ) {
                 item {
                     Text(
-                        "Choose a server to inspect its live PanePilot sessions.",
+                        "Connect more than one server and keep them warm while you switch.",
                         color = Muted,
                         style = MaterialTheme.typography.bodyMedium,
                         modifier = Modifier.padding(bottom = 8.dp)
@@ -154,6 +156,7 @@ fun ServerListScreen(
                 items(profiles, key = { it.id }) { profile ->
                     ServerCard(
                         profile = profile,
+                        connected = profile.id in connectedProfileIds,
                         onEdit = { onEdit(profile.id) },
                         onConnect = { onConnect(profile.id) }
                     )
@@ -211,6 +214,7 @@ private fun EmptyServers(onAdd: () -> Unit) {
 @Composable
 private fun ServerCard(
     profile: ServerProfile,
+    connected: Boolean,
     onEdit: () -> Unit,
     onConnect: () -> Unit
 ) {
@@ -255,6 +259,26 @@ private fun ServerCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (connected) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(7.dp)
+                                .clip(CircleShape)
+                                .background(Success)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "CONNECTED · TAP TO SWITCH",
+                            color = Success,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.7.sp
+                        )
+                    }
+                }
             }
             IconButton(onClick = onEdit) {
                 Icon(Icons.Default.Edit, contentDescription = "Edit ${profile.name}", tint = Muted)
@@ -617,6 +641,8 @@ fun CredentialsScreen(
 @Composable
 fun SessionWorkspaceScreen(
     profile: ServerProfile?,
+    profiles: List<ServerProfile>,
+    connectedProfileIds: Set<String>,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     transcript: String,
@@ -625,6 +651,8 @@ fun SessionWorkspaceScreen(
     isRefreshing: Boolean,
     isSending: Boolean,
     onRefresh: () -> Unit,
+    onShowServers: () -> Unit,
+    onSwitchServer: (String) -> Unit,
     onDisconnect: () -> Unit,
     onOpenSession: (String) -> Unit,
     onComposerChange: (String) -> Unit,
@@ -657,10 +685,14 @@ fun SessionWorkspaceScreen(
             ) {
                 SessionDrawerContent(
                     profile = profile,
+                    profiles = profiles,
+                    connectedProfileIds = connectedProfileIds,
                     sessions = sessions,
                     selectedSession = selectedSession,
                     isRefreshing = isRefreshing,
                     onRefresh = onRefresh,
+                    onShowServers = onShowServers,
+                    onSwitchServer = onSwitchServer,
                     onDisconnect = onDisconnect,
                     notificationTerminalIds = notificationTerminalIds,
                     onToggleNotifications = onToggleNotifications,
@@ -700,10 +732,14 @@ fun SessionWorkspaceScreen(
 @Composable
 private fun SessionDrawerContent(
     profile: ServerProfile?,
+    profiles: List<ServerProfile>,
+    connectedProfileIds: Set<String>,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
+    onShowServers: () -> Unit,
+    onSwitchServer: (String) -> Unit,
     onDisconnect: () -> Unit,
     notificationTerminalIds: Set<String>,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
@@ -719,23 +755,67 @@ private fun SessionDrawerContent(
             eyebrow = "SSH / ${profile?.name?.uppercase().orEmpty()}",
             title = "Sessions",
             action = {
-                IconButton(onClick = onRefresh, enabled = !isRefreshing) {
-                    if (isRefreshing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
+                Row {
+                    IconButton(onClick = onRefresh, enabled = !isRefreshing) {
+                        if (isRefreshing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(Icons.Default.Refresh, contentDescription = "Refresh sessions")
+                        }
+                    }
+                    IconButton(onClick = onDisconnect) {
+                        Icon(
+                            Icons.Default.PowerSettingsNew,
+                            contentDescription = "Disconnect ${profile?.name.orEmpty()}",
+                            tint = Muted
                         )
-                    } else {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh sessions")
                     }
                 }
             },
             navigation = {
-                IconButton(onClick = onDisconnect) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Disconnect")
+                IconButton(onClick = onShowServers) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "All servers")
                 }
             }
         )
+        val connectedProfiles = profiles.filter { it.id in connectedProfileIds }
+        if (connectedProfiles.isNotEmpty()) {
+            Text(
+                "CONNECTED SERVERS",
+                color = Muted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.9.sp,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                connectedProfiles.forEach { connectedProfile ->
+                    FilterChip(
+                        selected = connectedProfile.id == profile?.id,
+                        onClick = { onSwitchServer(connectedProfile.id) },
+                        label = { Text(connectedProfile.name) },
+                        leadingIcon = {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(Success)
+                            )
+                        }
+                    )
+                }
+            }
+        }
         Text(
             if (sessions.size == 1) "1 LIVE TMUX SESSION" else "${sessions.size} LIVE TMUX SESSIONS",
             color = Muted,
@@ -780,7 +860,7 @@ private fun SessionDrawerContent(
                 }
             }
         } else {
-            val projects = sessions.groupBy { it.projectPath }
+            val groups = sessionGroups(sessions)
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -790,8 +870,8 @@ private fun SessionDrawerContent(
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                projects.forEach { (path, projectSessions) ->
-                    stickyHeader(key = path) {
+                groups.forEach { group ->
+                    stickyHeader(key = group.key) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -799,21 +879,33 @@ private fun SessionDrawerContent(
                                 .padding(top = 14.dp, bottom = 8.dp)
                         ) {
                             Text(
-                                projectSessions.first().projectName,
+                                group.title,
+                                color = if (group.needsAttention) Attention else {
+                                    MaterialTheme.colorScheme.onBackground
+                                },
                                 fontWeight = FontWeight.SemiBold,
                                 style = MaterialTheme.typography.titleMedium
                             )
-                            Text(
-                                path,
-                                color = Muted,
+                            group.path?.let { path ->
+                                Text(
+                                    path,
+                                    color = Muted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            } ?: Text(
+                                "TERMINALS WAITING FOR YOU",
+                                color = Attention,
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 0.7.sp
                             )
                         }
                     }
-                    items(projectSessions, key = { it.terminalId }) { session ->
+                    items(group.sessions, key = { it.terminalId }) { session ->
                         SessionCard(
                             session = session,
                             selected = session.terminalId == selectedSession?.terminalId,

@@ -28,14 +28,32 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 
 class AgentMonitorService : Service() {
+    private data class ProfileMonitor(
+        val profileId: String,
+        val ssh: SshConnection,
+        val tmux: TmuxGateway,
+        val liveSecret: AtomicReference<ConnectionSecret?> = AtomicReference(null),
+        var job: Job? = null
+    )
+
+    private data class MonitorStatus(
+        val profileName: String,
+        val connected: Boolean,
+        val reconnecting: Boolean,
+        val alertCount: Int
+    )
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val liveSecret = AtomicReference<ConnectionSecret?>(null)
+    private val monitors = ConcurrentHashMap<String, ProfileMonitor>()
+    private val statuses = ConcurrentHashMap<String, MonitorStatus>()
 
     private lateinit var profiles: ProfileStore
     private lateinit var credentials: CredentialStore
@@ -43,151 +61,193 @@ class AgentMonitorService : Service() {
     private lateinit var monitorStore: BackgroundMonitorStore
     private lateinit var attentionNotifier: AttentionNotifier
     private lateinit var notificationManager: NotificationManager
-    private lateinit var ssh: SshConnection
-    private lateinit var tmux: TmuxGateway
-
-    private var monitorJob: Job? = null
-    private var activeProfileId: String? = null
 
     override fun onCreate() {
         super.onCreate()
+        activeInstance.set(this)
         profiles = ProfileStore(this)
         credentials = CredentialStore(this)
         attentionPreferences = AttentionPreferenceStore(this)
         monitorStore = BackgroundMonitorStore(this)
         attentionNotifier = AttentionNotifier(this)
         notificationManager = getSystemService(NotificationManager::class.java)
-        ssh = SshConnection(this, profiles) { false }
-        tmux = TmuxGateway(ssh)
         createMonitoringChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            val profileId = activeProfileId ?: monitorStore.activeProfileId()
-            profileId?.let(attentionPreferences::removeProfile)
-            stopMonitoring(clearConfiguration = true)
-            return START_NOT_STICKY
-        }
-
-        val requestedProfileId =
-            intent?.getStringExtra(EXTRA_PROFILE_ID) ?: monitorStore.activeProfileId()
-        if (requestedProfileId.isNullOrBlank()) {
-            stopMonitoring(clearConfiguration = true)
-            return START_NOT_STICKY
-        }
-
-        val profileChanged = activeProfileId != requestedProfileId
-        if (profileChanged) {
-            monitorJob?.cancel()
-            ssh.disconnect()
-            tmux.reset()
-            liveSecret.set(null)
-        }
-        if (intent?.action == ACTION_START) {
-            val secret = ConnectionSecret(
-                password = intent.getStringExtra(EXTRA_PASSWORD).orEmpty(),
-                keyPassphrase = intent.getStringExtra(EXTRA_KEY_PASSPHRASE).orEmpty()
-            )
-            liveSecret.set(secret)
-            processSecret.set(requestedProfileId to secret)
-        }
-
-        monitorStore.setActiveProfile(requestedProfileId)
         startAsForeground(
-            title = "Starting background monitoring",
-            detail = "Connecting to the SSH server…"
+            title = "Starting SSH monitoring",
+            detail = "Restoring background connections…"
         )
-        if (profileChanged || monitorJob?.isActive != true) {
-            activeProfileId = requestedProfileId
-            startMonitor(requestedProfileId)
+
+        when (intent?.action) {
+            ACTION_STOP_ALL -> {
+                monitorStore.monitoredProfileIds().forEach { profileId ->
+                    val terminalIds = attentionPreferences.enabledTerminalIds(profileId)
+                    attentionNotifier.cancelProfile(profileId, terminalIds)
+                    attentionPreferences.removeProfile(profileId)
+                }
+                stopAll(clearConfiguration = true)
+                return START_NOT_STICKY
+            }
+
+            ACTION_STOP_PROFILE -> {
+                intent.getStringExtra(EXTRA_PROFILE_ID)?.let(::stopProfile)
+                if (monitorStore.monitoredProfileIds().isEmpty()) {
+                    stopAll(clearConfiguration = false)
+                    return START_NOT_STICKY
+                }
+            }
+
+            ACTION_START -> {
+                val profileId = intent.getStringExtra(EXTRA_PROFILE_ID)
+                if (!profileId.isNullOrBlank()) {
+                    val secret = ConnectionSecret(
+                        password = intent.getStringExtra(EXTRA_PASSWORD).orEmpty(),
+                        keyPassphrase = intent.getStringExtra(EXTRA_KEY_PASSPHRASE).orEmpty()
+                    )
+                    processSecrets[profileId] = secret
+                    monitorStore.addProfile(profileId)
+                    startProfile(profileId, secret)
+                }
+            }
         }
+
+        monitorStore.monitoredProfileIds().forEach { profileId ->
+            startProfile(profileId, processSecrets[profileId])
+        }
+        if (monitorStore.monitoredProfileIds().isEmpty()) {
+            stopAll(clearConfiguration = false)
+            return START_NOT_STICKY
+        }
+        updateAggregateForeground()
         return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        monitorJob?.cancel()
+        monitors.values.forEach { monitor ->
+            monitor.job?.cancel()
+            monitor.ssh.disconnect()
+        }
+        monitors.clear()
+        statuses.clear()
         serviceScope.cancel()
-        ssh.disconnect()
-        liveSecret.set(null)
+        activeInstance.compareAndSet(this, null)
         super.onDestroy()
     }
 
-    private fun startMonitor(profileId: String) {
-        monitorJob?.cancel()
-        monitorJob = serviceScope.launch {
-            var previousStates: Map<String, SessionState> = emptyMap()
-            var failedAttempts = 0
+    private fun startProfile(profileId: String, secret: ConnectionSecret?) {
+        val existing = monitors[profileId]
+        if (existing != null) {
+            if (secret != null) existing.liveSecret.set(secret)
+            if (existing.job?.isActive == true) return
+        }
+        val monitor = existing ?: run {
+            val sharedSsh = SshConnection(this, profiles) { false }
+            ProfileMonitor(
+                profileId = profileId,
+                ssh = sharedSsh,
+                tmux = TmuxGateway(sharedSsh)
+            )
+        }.also { monitors[profileId] = it }
+        if (secret != null) monitor.liveSecret.set(secret)
+        monitor.job = serviceScope.launch { monitorProfile(monitor) }
+    }
 
-            while (isActive && monitorStore.activeProfileId() == profileId) {
-                val profile = profiles.load().firstOrNull { it.id == profileId }
-                if (profile == null) {
-                    stopMonitoring(clearConfiguration = true)
-                    return@launch
-                }
-                val enabledIds = attentionPreferences.enabledTerminalIds(profileId)
+    private suspend fun monitorProfile(monitor: ProfileMonitor) {
+        val profileId = monitor.profileId
+        var previousStates: Map<String, SessionState> = emptyMap()
+        var failedAttempts = 0
 
-                try {
-                    if (!ssh.isConnected) {
-                        val secret = connectionSecret(profile.authMode, profileId)
-                        if (secret == null) {
-                            updateForeground(
-                                title = "Background monitoring paused",
-                                detail = "Open PanePilot and reconnect to unlock ${profile.name}."
-                            )
-                            delay(PAUSED_RETRY_MS)
-                            continue
-                        }
-                        processSecret.set(profileId to secret)
-                        updateForeground(
-                            title = "Reconnecting to ${profile.name}",
-                            detail = "Restoring SSH monitoring…"
+        while (
+            currentCoroutineContext().isActive &&
+            profileId in monitorStore.monitoredProfileIds()
+        ) {
+            val profile = profiles.load().firstOrNull { it.id == profileId }
+            if (profile == null) {
+                monitorStore.removeProfile(profileId)
+                stopProfile(profileId)
+                return
+            }
+            val enabledIds = attentionPreferences.enabledTerminalIds(profileId)
+
+            try {
+                if (!monitor.ssh.isConnected) {
+                    val secret = connectionSecret(
+                        authMode = profile.authMode,
+                        profileId = profileId,
+                        monitor = monitor
+                    )
+                    if (secret == null) {
+                        statuses[profileId] = MonitorStatus(
+                            profileName = profile.name,
+                            connected = false,
+                            reconnecting = false,
+                            alertCount = enabledIds.size
                         )
-                        ssh.connect(profile, secret)
-                        tmux.reset()
-                        previousStates = emptyMap()
+                        updateAggregateForeground()
+                        delay(PAUSED_RETRY_MS)
+                        continue
                     }
-
-                    val sessions = tmux.listSessions()
-                    val currentStates = sessions.associate { it.terminalId to it.state }
-                    newlyAttentionRequired(previousStates, sessions)
-                        .filter { it.terminalId in enabledIds }
-                        .forEach { attentionNotifier.show(profile, it) }
-                    sessions
-                        .filter {
-                            previousStates[it.terminalId] == SessionState.NEEDS_INPUT &&
-                                it.state != SessionState.NEEDS_INPUT
-                        }
-                        .forEach {
-                            attentionNotifier.cancel(profileId, it.terminalId)
-                        }
-                    previousStates = currentStates
-                    failedAttempts = 0
-                    updateForeground(
-                        title = "Monitoring ${profile.name}",
-                        detail = monitoredTerminalLabel(enabledIds.size)
+                    processSecrets[profileId] = secret
+                    statuses[profileId] = MonitorStatus(
+                        profileName = profile.name,
+                        connected = false,
+                        reconnecting = true,
+                        alertCount = enabledIds.size
                     )
-                    delay(POLL_INTERVAL_MS)
-                } catch (_: Exception) {
-                    ssh.disconnect()
-                    tmux.reset()
+                    updateAggregateForeground()
+                    monitor.ssh.connect(profile, secret)
+                    monitor.tmux.reset()
                     previousStates = emptyMap()
-                    failedAttempts += 1
-                    val retryDelay = reconnectDelay(failedAttempts)
-                    updateForeground(
-                        title = "Reconnecting to ${profile.name}",
-                        detail = "SSH is offline · retrying in ${retryDelay / 1_000}s"
-                    )
-                    delay(retryDelay)
                 }
+
+                val sessions = monitor.tmux.listSessions()
+                val currentStates = sessions.associate { it.terminalId to it.state }
+                newlyAttentionRequired(previousStates, sessions)
+                    .filter { it.terminalId in enabledIds }
+                    .forEach { attentionNotifier.show(profile, it) }
+                sessions
+                    .filter {
+                        previousStates[it.terminalId] == SessionState.NEEDS_INPUT &&
+                            it.state != SessionState.NEEDS_INPUT
+                    }
+                    .forEach { attentionNotifier.cancel(profileId, it.terminalId) }
+                previousStates = currentStates
+                failedAttempts = 0
+                statuses[profileId] = MonitorStatus(
+                    profileName = profile.name,
+                    connected = true,
+                    reconnecting = false,
+                    alertCount = enabledIds.size
+                )
+                updateAggregateForeground()
+                delay(POLL_INTERVAL_MS)
+            } catch (_: Exception) {
+                monitor.ssh.disconnect()
+                monitor.tmux.reset()
+                previousStates = emptyMap()
+                failedAttempts += 1
+                statuses[profileId] = MonitorStatus(
+                    profileName = profile.name,
+                    connected = false,
+                    reconnecting = true,
+                    alertCount = enabledIds.size
+                )
+                updateAggregateForeground()
+                delay(reconnectDelay(failedAttempts))
             }
         }
     }
 
-    private fun connectionSecret(authMode: AuthMode, profileId: String): ConnectionSecret? {
-        liveSecret.get()?.let { secret ->
+    private fun connectionSecret(
+        authMode: AuthMode,
+        profileId: String,
+        monitor: ProfileMonitor
+    ): ConnectionSecret? {
+        monitor.liveSecret.get()?.let { secret ->
             when (authMode) {
                 AuthMode.PASSWORD -> if (secret.password.isNotEmpty()) return secret
                 AuthMode.PRIVATE_KEY -> return secret
@@ -199,7 +259,25 @@ class AgentMonitorService : Service() {
             }
 
             AuthMode.PRIVATE_KEY -> ConnectionSecret()
-        }?.also { processSecret.set(profileId to it) }
+        }?.also {
+            monitor.liveSecret.set(it)
+            processSecrets[profileId] = it
+        }
+    }
+
+    private fun stopProfile(profileId: String) {
+        monitorStore.removeProfile(profileId)
+        statuses.remove(profileId)
+        monitors.remove(profileId)?.let { monitor ->
+            monitor.job?.cancel()
+            monitor.ssh.disconnect()
+        }
+        processSecrets.remove(profileId)
+        if (monitorStore.monitoredProfileIds().isEmpty()) {
+            stopAll(clearConfiguration = false)
+        } else {
+            updateAggregateForeground()
+        }
     }
 
     private fun createMonitoringChannel() {
@@ -228,7 +306,24 @@ class AgentMonitorService : Service() {
         }
     }
 
-    private fun updateForeground(title: String, detail: String) {
+    @Synchronized
+    private fun updateAggregateForeground() {
+        val profileIds = monitorStore.monitoredProfileIds()
+        if (profileIds.isEmpty()) return
+        val activeStatuses = profileIds.mapNotNull(statuses::get)
+        val connectedCount = activeStatuses.count { it.connected }
+        val reconnectingCount = activeStatuses.count { it.reconnecting }
+        val alertCount = activeStatuses.sumOf { it.alertCount }
+        val title = monitoringTitle(
+            serverCount = profileIds.size,
+            singleServerName = activeStatuses.singleOrNull()?.profileName
+        )
+        val detail = aggregateStatusLabel(
+            serverCount = profileIds.size,
+            connectedCount = connectedCount,
+            reconnectingCount = reconnectingCount,
+            alertCount = alertCount
+        )
         notificationManager.notify(
             MONITOR_NOTIFICATION_ID,
             monitoringNotification(title, detail)
@@ -247,7 +342,7 @@ class AgentMonitorService : Service() {
         val stopMonitoring = PendingIntent.getService(
             this,
             MONITOR_NOTIFICATION_ID,
-            Intent(this, AgentMonitorService::class.java).setAction(ACTION_STOP),
+            Intent(this, AgentMonitorService::class.java).setAction(ACTION_STOP_ALL),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return Notification.Builder(this, MONITOR_CHANNEL_ID)
@@ -261,22 +356,22 @@ class AgentMonitorService : Service() {
             .addAction(
                 Notification.Action.Builder(
                     null,
-                    "Stop",
+                    "Stop all",
                     stopMonitoring
                 ).build()
             )
             .build()
     }
 
-    private fun stopMonitoring(clearConfiguration: Boolean) {
-        if (clearConfiguration) {
-            monitorStore.clear(activeProfileId)
+    private fun stopAll(clearConfiguration: Boolean) {
+        if (clearConfiguration) monitorStore.clear()
+        monitors.values.forEach { monitor ->
+            monitor.job?.cancel()
+            monitor.ssh.disconnect()
         }
-        monitorJob?.cancel()
-        monitorJob = null
-        ssh.disconnect()
-        liveSecret.set(null)
-        clearProcessSecret(activeProfileId)
+        monitors.clear()
+        statuses.clear()
+        processSecrets.clear()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -284,8 +379,10 @@ class AgentMonitorService : Service() {
     companion object {
         private const val ACTION_START =
             "com.panepilot.remote.action.START_BACKGROUND_MONITOR"
-        private const val ACTION_STOP =
-            "com.panepilot.remote.action.STOP_BACKGROUND_MONITOR"
+        private const val ACTION_STOP_PROFILE =
+            "com.panepilot.remote.action.STOP_PROFILE_MONITOR"
+        private const val ACTION_STOP_ALL =
+            "com.panepilot.remote.action.STOP_ALL_BACKGROUND_MONITORS"
         private const val EXTRA_PROFILE_ID = "profile_id"
         private const val EXTRA_PASSWORD = "password"
         private const val EXTRA_KEY_PASSPHRASE = "key_passphrase"
@@ -294,14 +391,16 @@ class AgentMonitorService : Service() {
         private const val POLL_INTERVAL_MS = 6_000L
         private const val PAUSED_RETRY_MS = 30_000L
         private const val MAX_RECONNECT_DELAY_MS = 60_000L
-        private val processSecret =
-            AtomicReference<Pair<String, ConnectionSecret>?>(null)
+        private val processSecrets = ConcurrentHashMap<String, ConnectionSecret>()
+        private val activeInstance = AtomicReference<AgentMonitorService?>(null)
 
         fun start(
             context: Context,
             profileId: String,
             secret: ConnectionSecret
         ) {
+            processSecrets[profileId] = secret
+            BackgroundMonitorStore(context).addProfile(profileId)
             val intent = Intent(context, AgentMonitorService::class.java)
                 .setAction(ACTION_START)
                 .putExtra(EXTRA_PROFILE_ID, profileId)
@@ -310,16 +409,31 @@ class AgentMonitorService : Service() {
             context.startForegroundService(intent)
         }
 
-        fun stop(context: Context, profileId: String? = null) {
+        fun stop(context: Context, profileId: String) {
             val store = BackgroundMonitorStore(context)
-            if (profileId != null && store.activeProfileId() != profileId) return
-            store.clear(profileId)
-            clearProcessSecret(profileId)
-            context.stopService(Intent(context, AgentMonitorService::class.java))
+            if (profileId !in store.monitoredProfileIds()) return
+            store.removeProfile(profileId)
+            processSecrets.remove(profileId)
+            if (store.monitoredProfileIds().isEmpty()) {
+                context.stopService(Intent(context, AgentMonitorService::class.java))
+            } else {
+                context.startService(
+                    Intent(context, AgentMonitorService::class.java)
+                        .setAction(ACTION_STOP_PROFILE)
+                        .putExtra(EXTRA_PROFILE_ID, profileId)
+                )
+            }
         }
 
         fun connectionSecretFor(profileId: String): ConnectionSecret? =
-            processSecret.get()?.takeIf { it.first == profileId }?.second
+            processSecrets[profileId]
+
+        fun connectedSshFor(profileId: String): SshConnection? =
+            activeInstance.get()
+                ?.monitors
+                ?.get(profileId)
+                ?.ssh
+                ?.takeIf { it.isConnected }
 
         internal fun reconnectDelay(failedAttempts: Int): Long {
             val exponent = (failedAttempts - 1).coerceIn(0, 4)
@@ -333,11 +447,32 @@ class AgentMonitorService : Service() {
                 else -> "Watching $count terminals for attention"
             }
 
-        private fun clearProcessSecret(profileId: String?) {
-            val current = processSecret.get() ?: return
-            if (profileId == null || current.first == profileId) {
-                processSecret.compareAndSet(current, null)
+        internal fun monitoringTitle(serverCount: Int, singleServerName: String?): String =
+            if (serverCount == 1 && !singleServerName.isNullOrBlank()) {
+                "Monitoring $singleServerName"
+            } else if (serverCount == 1) {
+                "Monitoring SSH server"
+            } else {
+                "Monitoring $serverCount SSH servers"
             }
+
+        internal fun aggregateStatusLabel(
+            serverCount: Int,
+            connectedCount: Int,
+            reconnectingCount: Int,
+            alertCount: Int
+        ): String {
+            if (serverCount == 1 && connectedCount == 1) {
+                return monitoredTerminalLabel(alertCount)
+            }
+            val connectionLabel = "$connectedCount/$serverCount connected"
+            val retryLabel = if (reconnectingCount > 0) " · $reconnectingCount reconnecting" else ""
+            val alertLabel = when (alertCount) {
+                0 -> " · no terminal alerts"
+                1 -> " · 1 terminal alert"
+                else -> " · $alertCount terminal alerts"
+            }
+            return connectionLabel + retryLabel + alertLabel
         }
     }
 }

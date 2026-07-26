@@ -29,4 +29,29 @@ class AgentMonitorServiceTest {
             AgentMonitorService.monitoredTerminalLabel(3)
         )
     }
+
+    @Test
+    fun aggregateStatusSummarizesMultipleServers() {
+        assertEquals(
+            "Monitoring 3 SSH servers",
+            AgentMonitorService.monitoringTitle(3, null)
+        )
+        assertEquals(
+            "Monitoring Build box",
+            AgentMonitorService.monitoringTitle(1, "Build box")
+        )
+        assertEquals(
+            "Monitoring SSH server",
+            AgentMonitorService.monitoringTitle(1, null)
+        )
+        assertEquals(
+            "2/3 connected · 1 reconnecting · 4 terminal alerts",
+            AgentMonitorService.aggregateStatusLabel(
+                serverCount = 3,
+                connectedCount = 2,
+                reconnectingCount = 1,
+                alertCount = 4
+            )
+        )
+    }
 }

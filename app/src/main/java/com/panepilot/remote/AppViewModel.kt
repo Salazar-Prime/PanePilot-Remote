@@ -54,6 +54,7 @@ data class AppUiState(
     val profiles: List<ServerProfile> = emptyList(),
     val screen: AppScreen = AppScreen.Servers,
     val connectedProfile: ServerProfile? = null,
+    val connectedProfileIds: Set<String> = emptySet(),
     val sessions: List<PanePilotSession> = emptyList(),
     val selectedSession: PanePilotSession? = null,
     val transcript: String = "",
@@ -81,6 +82,16 @@ private data class PendingTrust(
     @Volatile var accepted: Boolean = false
 )
 
+private data class LiveConnection(
+    val profile: ServerProfile,
+    val ssh: SshConnection,
+    val tmux: TmuxGateway,
+    val remoteFiles: RemoteFileGateway,
+    val secret: ConnectionSecret,
+    var sessions: List<PanePilotSession>,
+    val ownsTransport: Boolean
+)
+
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = ProfileStore(application)
     private val credentialStore = CredentialStore(application)
@@ -88,18 +99,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val backgroundMonitorStore = BackgroundMonitorStore(application)
     private val attentionNotifier = AttentionNotifier(application)
     private val pendingTrust = AtomicReference<PendingTrust?>(null)
-    private val ssh = SshConnection(application, profileStore, ::awaitHostKeyDecision)
-    private val tmux = TmuxGateway(ssh)
-    private val remoteFiles = RemoteFileGateway(ssh)
-    private val _state = MutableStateFlow(AppUiState(profiles = profileStore.load()))
+    private val connections = linkedMapOf<String, LiveConnection>()
+    private var activeProfileId: String? = null
+    private val _state = MutableStateFlow(
+        AppUiState(
+            profiles = profileStore.load(),
+            connectedProfileIds = backgroundMonitorStore.monitoredProfileIds()
+        )
+    )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
+
+    private val activeConnection: LiveConnection?
+        get() = activeProfileId?.let(connections::get)
 
     private var consolePolling: Job? = null
     private var sessionPolling: Job? = null
     private var fileLoading: Job? = null
     private var consoleFailureReported = false
     private var lastSessionStates: Map<String, SessionState> = emptyMap()
-    private var activeConnectionSecret: ConnectionSecret? = null
 
     init {
         restoreBackgroundConnection()
@@ -115,6 +132,58 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openCredentials(profileId: String) {
         _state.update { it.copy(screen = AppScreen.Credentials(profileId), error = null) }
+    }
+
+    fun openServer(profileId: String) {
+        val existing = connections[profileId]
+        if (existing?.ssh?.isConnected == true) {
+            activateConnection(existing)
+            return
+        }
+        val profile = profile(profileId) ?: return
+        AgentMonitorService.connectedSshFor(profileId)?.let { warmSsh ->
+            attachToWarmConnection(profile, warmSsh)
+            return
+        }
+        val secret = AgentMonitorService.connectionSecretFor(profileId) ?: when (profile.authMode) {
+            AuthMode.PASSWORD -> credentialStore.password(profileId)?.let {
+                ConnectionSecret(password = it)
+            }
+
+            AuthMode.PRIVATE_KEY -> ConnectionSecret()
+        }
+        if (profileId in backgroundMonitorStore.monitoredProfileIds() && secret != null) {
+            connect(
+                profileId = profileId,
+                secret = secret,
+                rememberPassword =
+                    profile.authMode == AuthMode.PASSWORD &&
+                        credentialStore.password(profileId) != null
+            )
+        } else {
+            openCredentials(profileId)
+        }
+    }
+
+    fun showServers() {
+        consolePolling?.cancel()
+        consolePolling = null
+        fileLoading?.cancel()
+        fileLoading = null
+        _state.update {
+            it.copy(
+                screen = AppScreen.Servers,
+                selectedSession = null,
+                transcript = "",
+                paneTitle = "",
+                composer = "",
+                remoteFileRoot = "",
+                remoteFilePath = "",
+                remoteFiles = emptyList(),
+                highlightedRemoteFilePath = null,
+                error = null
+            )
+        }
     }
 
     fun saveServer(profile: ServerProfile, selectedKey: Uri?) {
@@ -135,7 +204,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     profileStore.save(normalized, selectedKey)
                 }
             }.onSuccess { profiles ->
-                AgentMonitorService.stop(getApplication(), normalized.id)
+                disconnectProfile(normalized.id, stopBackground = true)
                 if (normalized.authMode != AuthMode.PASSWORD) {
                     credentialStore.remove(normalized.id)
                 }
@@ -152,7 +221,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteServer(profileId: String) {
         viewModelScope.launch {
-            AgentMonitorService.stop(getApplication(), profileId)
+            disconnectProfile(profileId, stopBackground = true)
             val profiles = withContext(Dispatchers.IO) {
                 credentialStore.remove(profileId)
                 profileStore.delete(profileId)
@@ -170,7 +239,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val profile = profile(profileId) ?: return
         viewModelScope.launch {
             runCatching {
-                withContext(Dispatchers.IO) { ssh.forgetHostKey(profile) }
+                withContext(Dispatchers.IO) {
+                    SshConnection(
+                        getApplication(),
+                        profileStore,
+                        ::awaitHostKeyDecision
+                    ).forgetHostKey(profile)
+                }
             }.onSuccess {
                 _state.update {
                     it.copy(error = "Saved host key removed. Verify the fingerprint when you reconnect.")
@@ -189,50 +264,52 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(isBusy = true, error = null) }
             runCatching {
                 withContext(Dispatchers.IO) {
-                    ssh.connect(profile, secret)
-                    tmux.reset()
-                    val sessions = tmux.listSessions()
-                    if (profile.authMode == AuthMode.PASSWORD) {
-                        if (rememberPassword) {
-                            credentialStore.savePassword(profile.id, secret.password)
-                        } else {
-                            credentialStore.remove(profile.id)
-                        }
-                    }
-                    sessions
-                }
-            }.onSuccess { sessions ->
-                activeConnectionSecret = secret
-                lastSessionStates = sessions.associate { it.terminalId to it.state }
-                val notificationTerminalIds =
-                    attentionPreferences.enabledTerminalIds(profile.id)
-                _state.update {
-                    it.copy(
-                        connectedProfile = profile,
-                        sessions = sessions,
-                        attentionNotificationTerminalIds = notificationTerminalIds,
-                        screen = AppScreen.Sessions,
-                        isBusy = false,
-                        composer = "",
-                        transcript = "",
-                        notice = null
+                    val nextSsh = SshConnection(
+                        getApplication(),
+                        profileStore,
+                        ::awaitHostKeyDecision
                     )
+                    try {
+                        nextSsh.connect(profile, secret)
+                        val nextTmux = TmuxGateway(nextSsh)
+                        val sessions = nextTmux.listSessions()
+                        if (profile.authMode == AuthMode.PASSWORD) {
+                            if (rememberPassword) {
+                                credentialStore.savePassword(profile.id, secret.password)
+                            } else {
+                                credentialStore.remove(profile.id)
+                            }
+                        }
+                        LiveConnection(
+                            profile = profile,
+                            ssh = nextSsh,
+                            tmux = nextTmux,
+                            remoteFiles = RemoteFileGateway(nextSsh),
+                            secret = secret,
+                            sessions = sessions,
+                            ownsTransport = true
+                        )
+                    } catch (error: Exception) {
+                        nextSsh.disconnect()
+                        throw error
+                    }
                 }
+            }.onSuccess { connection ->
+                connections.remove(profile.id)?.let { prior ->
+                    if (prior.ownsTransport) prior.ssh.disconnect()
+                }
+                connections[profile.id] = connection
                 AgentMonitorService.start(getApplication(), profile.id, secret)
-                startSessionPolling()
+                activateConnection(connection)
             }.onFailure { error ->
-                activeConnectionSecret = null
-                ssh.disconnect()
                 finishWithError(error)
             }
         }
     }
 
     fun disconnect() {
-        _state.value.connectedProfile?.id?.let { profileId ->
-            AgentMonitorService.stop(getApplication(), profileId)
-        }
-        activeConnectionSecret = null
+        val profileId = activeProfileId ?: return
+        disconnectProfile(profileId, stopBackground = true)
         consolePolling?.cancel()
         consolePolling = null
         sessionPolling?.cancel()
@@ -240,11 +317,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         fileLoading?.cancel()
         fileLoading = null
         lastSessionStates = emptyMap()
-        ssh.disconnect()
-        tmux.reset()
+        activeProfileId = null
         _state.update {
             it.copy(
                 connectedProfile = null,
+                connectedProfileIds = connectedProfileIds(),
                 sessions = emptyList(),
                 selectedSession = null,
                 transcript = "",
@@ -267,13 +344,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshSessions() {
-        if (!ssh.isConnected || _state.value.isBusy) return
+        val connection = activeConnection ?: return
+        if (!connection.ssh.isConnected || _state.value.isBusy) return
         viewModelScope.launch {
             _state.update { it.copy(isBusy = true, error = null) }
             runCatching {
-                withContext(Dispatchers.IO) { tmux.listSessions() }
+                withContext(Dispatchers.IO) { connection.tmux.listSessions() }
             }.onSuccess { sessions ->
-                applySessionScan(sessions, detectTransitions = true)
+                connection.sessions = sessions
+                if (activeProfileId == connection.profile.id) {
+                    applySessionScan(sessions, detectTransitions = true)
+                }
                 _state.update { it.copy(isBusy = false) }
             }.onFailure(::finishWithError)
         }
@@ -314,6 +395,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openFilesAtPath(reference: String) {
         val session = _state.value.selectedSession ?: return
+        val fileGateway = activeConnection?.remoteFiles ?: return
         consolePolling?.cancel()
         consolePolling = null
         fileLoading?.cancel()
@@ -332,8 +414,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         fileLoading = viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
-                    val location = remoteFiles.locate(session.projectPath, reference)
-                    location to remoteFiles.list(
+                    val location = fileGateway.locate(session.projectPath, reference)
+                    location to fileGateway.list(
                         session.projectPath,
                         location.directoryRelativePath
                     )
@@ -370,6 +452,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun finishDownloadDestination(uri: Uri?) {
         val request = _state.value.pendingDownload ?: return
+        val fileGateway = activeConnection?.remoteFiles ?: return
         if (uri == null) {
             _state.update { it.copy(pendingDownload = null) }
             return
@@ -389,7 +472,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) {
                     val resolver = getApplication<Application>().contentResolver
                     resolver.openOutputStream(uri, "w")?.use { output ->
-                        remoteFiles.download(
+                        fileGateway.download(
                             rootPath = root,
                             relativePath = request.file.relativePath,
                             output = output
@@ -437,7 +520,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         } else if (!enabled) {
             attentionNotifier.cancel(profile.id, terminalId)
         }
-        val secret = activeConnectionSecret ?: when (profile.authMode) {
+        val secret = activeConnection?.secret ?: when (profile.authMode) {
             AuthMode.PASSWORD -> credentialStore.password(profile.id)?.let {
                 ConnectionSecret(password = it)
             }
@@ -469,14 +552,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendMessage() {
         val current = _state.value
+        val connection = activeConnection ?: return
         val sessionName = current.selectedSession?.name ?: return
         val message = current.composer
         if (message.isBlank() || current.isSending) return
         viewModelScope.launch {
             _state.update { it.copy(isSending = true, error = null) }
             runCatching {
-                withContext(Dispatchers.IO) { tmux.send(sessionName, message) }
+                withContext(Dispatchers.IO) { connection.tmux.send(sessionName, message) }
             }.onSuccess {
+                if (activeProfileId != connection.profile.id) return@onSuccess
                 _state.update { it.copy(composer = "", isSending = false) }
                 delay(250)
                 refreshConsole(sessionName, reportError = true)
@@ -488,11 +573,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendTerminalKey(key: TerminalKey) {
+        val connection = activeConnection ?: return
         val sessionName = _state.value.selectedSession?.name ?: return
         viewModelScope.launch {
             runCatching {
-                withContext(Dispatchers.IO) { tmux.sendKey(sessionName, key) }
+                withContext(Dispatchers.IO) { connection.tmux.sendKey(sessionName, key) }
             }.onSuccess {
+                if (activeProfileId != connection.profile.id) return@onSuccess
                 delay(120)
                 refreshConsole(sessionName, reportError = true)
             }.onFailure(::finishWithError)
@@ -521,7 +608,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             is AppScreen.EditServer, is AppScreen.Credentials ->
                 _state.update { it.copy(screen = AppScreen.Servers, error = null) }
 
-            AppScreen.Sessions -> disconnect()
+            AppScreen.Sessions -> showServers()
             is AppScreen.Console -> {
                 consolePolling?.cancel()
                 consolePolling = null
@@ -571,7 +658,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun forgetPassword(profileId: String) {
         credentialStore.remove(profileId)
-        AgentMonitorService.stop(getApplication(), profileId)
+        disconnectProfile(profileId, stopBackground = true)
     }
 
     override fun onCleared() {
@@ -579,14 +666,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         consolePolling?.cancel()
         sessionPolling?.cancel()
         fileLoading?.cancel()
-        activeConnectionSecret = null
-        ssh.disconnect()
+        connections.values.filter { it.ownsTransport }.forEach { it.ssh.disconnect() }
+        connections.clear()
+        activeProfileId = null
         super.onCleared()
     }
 
     private fun restoreBackgroundConnection() {
-        val profileId = backgroundMonitorStore.activeProfileId() ?: return
+        val profileId = backgroundMonitorStore.lastActiveProfileId() ?: return
         val profile = profile(profileId) ?: return
+        AgentMonitorService.connectedSshFor(profileId)?.let { warmSsh ->
+            attachToWarmConnection(profile, warmSsh)
+            return
+        }
         val secret = AgentMonitorService.connectionSecretFor(profileId) ?: when (profile.authMode) {
             AuthMode.PASSWORD -> credentialStore.password(profileId)?.let {
                 ConnectionSecret(password = it)
@@ -603,8 +695,109 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    private fun activateConnection(connection: LiveConnection) {
+        consolePolling?.cancel()
+        consolePolling = null
+        fileLoading?.cancel()
+        fileLoading = null
+        activeProfileId = connection.profile.id
+        backgroundMonitorStore.addProfile(connection.profile.id)
+        lastSessionStates = connection.sessions.associate { it.terminalId to it.state }
+        _state.update {
+            it.copy(
+                connectedProfile = connection.profile,
+                connectedProfileIds = connectedProfileIds(),
+                sessions = connection.sessions,
+                selectedSession = null,
+                transcript = "",
+                paneTitle = "",
+                composer = "",
+                isBusy = false,
+                isSending = false,
+                attentionNotificationTerminalIds =
+                    attentionPreferences.enabledTerminalIds(connection.profile.id),
+                remoteFileRoot = "",
+                remoteFilePath = "",
+                remoteFiles = emptyList(),
+                highlightedRemoteFilePath = null,
+                isLoadingFiles = false,
+                pendingDownload = null,
+                isDownloading = false,
+                downloadProgress = null,
+                screen = AppScreen.Sessions,
+                notice = null,
+                error = null
+            )
+        }
+        startSessionPolling()
+    }
+
+    private fun attachToWarmConnection(profile: ServerProfile, warmSsh: SshConnection) {
+        viewModelScope.launch {
+            _state.update { it.copy(isBusy = true, error = null) }
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val warmTmux = TmuxGateway(warmSsh)
+                    LiveConnection(
+                        profile = profile,
+                        ssh = warmSsh,
+                        tmux = warmTmux,
+                        remoteFiles = RemoteFileGateway(warmSsh),
+                        secret = AgentMonitorService.connectionSecretFor(profile.id)
+                            ?: ConnectionSecret(),
+                        sessions = warmTmux.listSessions(),
+                        ownsTransport = false
+                    )
+                }
+            }.onSuccess { connection ->
+                connections.remove(profile.id)?.let { prior ->
+                    if (prior.ownsTransport) prior.ssh.disconnect()
+                }
+                connections[profile.id] = connection
+                activateConnection(connection)
+            }.onFailure(::finishWithError)
+        }
+    }
+
+    private fun disconnectProfile(profileId: String, stopBackground: Boolean) {
+        connections.remove(profileId)?.let { connection ->
+            connection.tmux.reset()
+            if (connection.ownsTransport) connection.ssh.disconnect()
+        }
+        if (stopBackground) {
+            AgentMonitorService.stop(getApplication(), profileId)
+        }
+        if (activeProfileId == profileId) {
+            activeProfileId = null
+            consolePolling?.cancel()
+            consolePolling = null
+            sessionPolling?.cancel()
+            sessionPolling = null
+            fileLoading?.cancel()
+            fileLoading = null
+            lastSessionStates = emptyMap()
+            _state.update {
+                it.copy(
+                    connectedProfile = null,
+                    sessions = emptyList(),
+                    selectedSession = null,
+                    transcript = "",
+                    paneTitle = "",
+                    composer = "",
+                    attentionNotificationTerminalIds = emptySet()
+                )
+            }
+        }
+        _state.update { it.copy(connectedProfileIds = connectedProfileIds()) }
+    }
+
+    private fun connectedProfileIds(): Set<String> =
+        backgroundMonitorStore.monitoredProfileIds() +
+            connections.values.filter { it.ssh.isConnected }.map { it.profile.id }
+
     private fun loadRemoteDirectory(relativePath: String) {
-        if (!ssh.isConnected || _state.value.isLoadingFiles) return
+        val connection = activeConnection ?: return
+        if (!connection.ssh.isConnected || _state.value.isLoadingFiles) return
         val root = _state.value.remoteFileRoot
         fileLoading = viewModelScope.launch {
             _state.update {
@@ -616,7 +809,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             runCatching {
                 withContext(Dispatchers.IO) {
-                    remoteFiles.list(root, relativePath)
+                    connection.remoteFiles.list(root, relativePath)
                 }
             }.onSuccess { files ->
                 _state.update {
@@ -646,13 +839,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun startSessionPolling() {
         sessionPolling?.cancel()
+        val profileId = activeProfileId ?: return
+        val connection = connections[profileId] ?: return
         sessionPolling = viewModelScope.launch {
             delay(SESSION_POLL_INTERVAL_MS)
-            while (ssh.isConnected && _state.value.connectedProfile != null) {
-                if (!_state.value.isBusy && !_state.value.isDownloading) {
+            while (
+                activeProfileId == profileId &&
+                _state.value.connectedProfile?.id == profileId
+            ) {
+                if (
+                    connection.ssh.isConnected &&
+                    !_state.value.isBusy &&
+                    !_state.value.isDownloading
+                ) {
                     runCatching {
-                        withContext(Dispatchers.IO) { tmux.listSessions() }
+                        withContext(Dispatchers.IO) { connection.tmux.listSessions() }
                     }.onSuccess { sessions ->
+                        connection.sessions = sessions
                         applySessionScan(sessions, detectTransitions = true)
                     }
                 }
@@ -680,6 +883,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 .forEach { attentionNotifier.cancel(profile.id, it.terminalId) }
         }
         lastSessionStates = sessions.associate { it.terminalId to it.state }
+        activeConnection?.sessions = sessions
         _state.update { state ->
             val selected = state.selectedSession?.let { selectedSession ->
                 sessions.firstOrNull { it.terminalId == selectedSession.terminalId }
@@ -697,9 +901,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun refreshConsole(sessionName: String, reportError: Boolean) {
+        val connection = activeConnection ?: return
         runCatching {
-            withContext(Dispatchers.IO) { tmux.capture(sessionName) }
+            withContext(Dispatchers.IO) { connection.tmux.capture(sessionName) }
         }.onSuccess { snapshot ->
+            if (activeProfileId != connection.profile.id) return@onSuccess
             consoleFailureReported = false
             _state.update { current ->
                 val prior = current.selectedSession

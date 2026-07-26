@@ -128,9 +128,10 @@ class MainActivity : ComponentActivity() {
                         when (val screen = state.screen) {
                             AppScreen.Servers -> ServerListScreen(
                                 profiles = state.profiles,
+                                connectedProfileIds = state.connectedProfileIds,
                                 onAdd = appViewModel::addServer,
                                 onEdit = appViewModel::editServer,
-                                onConnect = appViewModel::openCredentials
+                                onConnect = appViewModel::openServer
                             )
 
                             is AppScreen.EditServer -> ServerEditorScreen(
@@ -173,6 +174,8 @@ class MainActivity : ComponentActivity() {
 
                             AppScreen.Sessions, is AppScreen.Console -> SessionWorkspaceScreen(
                                 profile = state.connectedProfile,
+                                profiles = state.profiles,
+                                connectedProfileIds = state.connectedProfileIds,
                                 sessions = state.sessions,
                                 selectedSession = state.selectedSession,
                                 transcript = state.transcript,
@@ -181,6 +184,8 @@ class MainActivity : ComponentActivity() {
                                 isRefreshing = state.isBusy,
                                 isSending = state.isSending,
                                 onRefresh = appViewModel::refreshSessions,
+                                onShowServers = appViewModel::showServers,
+                                onSwitchServer = appViewModel::openServer,
                                 onDisconnect = appViewModel::disconnect,
                                 onOpenSession = appViewModel::openConsole,
                                 onComposerChange = appViewModel::updateComposer,

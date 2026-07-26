@@ -11,6 +11,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 ## What it supports
 
 - Multiple manually configured SSH servers
+- Multiple simultaneous SSH/tmux connections with fast switching between warm servers
 - Password or imported private-key authentication
 - Optional password storage encrypted with Android Keystore
 - SSH host-key verification and saved `known_hosts`
@@ -22,6 +23,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
 - Project-scoped remote file browsing with downloads through Android's system file picker
 - Per-terminal alerts when a Codex or Claude session transitions to needing input
+- A dedicated attention queue that keeps waiting terminals above project groups
 - Foreground SSH/tmux monitoring that continues after leaving or swiping away the app
 - Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
@@ -102,11 +104,15 @@ and allow installation from that file source when Android asks.
    a prompt.
 6. Use the folder button in a session header to browse its remote project and save a
    file to any location offered by Android.
-7. Open the session side pane and tap a terminal's bell to enable or disable attention
-   alerts. The persistent connection monitor starts after SSH connects and stops only
-   when you explicitly disconnect or use its notification action. On Android 13 and
-   newer, approve the notification permission the first time.
-8. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
+7. Connect any additional servers you want to keep warm. Connected servers appear as
+   a switcher at the top of the session side pane, and tapping one changes servers
+   without disconnecting the others.
+8. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
+   input moves into the **Needs attention** section at the top of the list. The
+   persistent monitor keeps every connected server online and stops an individual
+   connection only when you explicitly disconnect it. On Android 13 and newer,
+   approve the notification permission the first time.
+9. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
    open its folder in Remote Files; file paths are highlighted and remain one tap away
    from downloading.
 
@@ -118,7 +124,7 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
 - Passwords stay in memory unless **Remember on this phone** is enabled. Remembered
   passwords are encrypted using a non-exportable Android Keystore key, and Android
   backup is disabled for the app.
-- Private-key passphrases always stay in memory only for the active connection.
+- Private-key passphrases always stay in memory only for their connected server.
 - Imported private keys live in Android's app-private storage and are removed when the
   server profile is deleted.
 - Message text is sent as SSH channel input to `tmux load-buffer`; it is not interpolated
@@ -127,10 +133,10 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
 - The transcript is capped to the most recent 300 pane lines and 768 KB per refresh.
 - File browsing is bounded to the session's project folder. Symbolic links are omitted,
   and file bytes stream directly from SFTP into the Android destination you select.
-- A low-priority foreground-service notification keeps attention polling active after
-  leaving or swiping away the app, even when no terminal bell is enabled. Its **Stop**
-  action disables the current server's terminal bells and ends background monitoring;
-  explicitly disconnecting also stops it.
+- A low-priority foreground-service notification keeps every connected server's SSH
+  and attention polling active after leaving or swiping away the app, even when no
+  terminal bell is enabled. Its **Stop all** action disables terminal bells and ends
+  all background monitoring; disconnecting one server leaves the others connected.
 - Pressing Android Back from the session list backgrounds PanePilot instead of
   disconnecting. If Android recreates the activity while the service remains active,
   PanePilot restores the monitored SSH connection automatically.
