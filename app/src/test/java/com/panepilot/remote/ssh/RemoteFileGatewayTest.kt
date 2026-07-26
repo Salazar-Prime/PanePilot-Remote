@@ -51,4 +51,29 @@ class RemoteFileGatewayTest {
         assertEquals("", RemoteFileGateway.parentPath("results"))
         assertEquals("", RemoteFileGateway.parentPath(""))
     }
+
+    @Test
+    fun terminalReferencesDropLineLocationsAndStayRelative() {
+        assertEquals(
+            "src/main.kt",
+            RemoteFileGateway.sanitizeReference("src/main.kt:42:7")
+        )
+        assertEquals(
+            "src/main.kt",
+            RemoteFileGateway.relativeToRoot(
+                "/work/project",
+                "/work/project/src/main.kt"
+            )
+        )
+    }
+
+    @Test
+    fun relativeConversionRejectsSiblingProjects() {
+        assertThrows(IllegalArgumentException::class.java) {
+            RemoteFileGateway.relativeToRoot(
+                "/work/project",
+                "/work/project-copy/secret.txt"
+            )
+        }
+    }
 }

@@ -6,6 +6,11 @@ import com.panepilot.remote.model.RemoteFileEntry
 import java.io.OutputStream
 import java.util.Vector
 
+data class RemoteFileLocation(
+    val directoryRelativePath: String,
+    val selectedFileRelativePath: String?
+)
+
 class RemoteFileGateway(private val ssh: SshConnection) {
     fun list(rootPath: String, relativePath: String): List<RemoteFileEntry> {
         val normalized = normalizeRelativePath(relativePath)
@@ -36,6 +41,36 @@ class RemoteFileGateway(private val ssh: SshConnection) {
                         .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name }
                 )
                 .toList()
+        }
+    }
+
+    fun locate(rootPath: String, reference: String): RemoteFileLocation {
+        val cleanedReference = sanitizeReference(reference)
+        return ssh.withSftp { sftp ->
+            val root = canonicalRoot(sftp, rootPath)
+            val unresolved = if (cleanedReference.startsWith('/')) {
+                cleanedReference
+            } else {
+                val relative = normalizeRelativePath(cleanedReference.removePrefix("./"))
+                if (root == "/") "/$relative" else "$root/$relative"
+            }
+            val resolved = sftp.realpath(unresolved).trimEnd('/').ifEmpty { "/" }
+            require(isWithinRoot(root, resolved)) {
+                "The selected path leaves the project folder."
+            }
+            val attributes = sftp.stat(resolved)
+            val relative = relativeToRoot(root, resolved)
+            if (attributes.isDir) {
+                RemoteFileLocation(
+                    directoryRelativePath = relative,
+                    selectedFileRelativePath = null
+                )
+            } else {
+                RemoteFileLocation(
+                    directoryRelativePath = parentPath(relative),
+                    selectedFileRelativePath = relative
+                )
+            }
         }
     }
 
@@ -145,6 +180,31 @@ class RemoteFileGateway(private val ssh: SshConnection) {
 
         internal fun parentPath(path: String): String =
             normalizeRelativePath(path).substringBeforeLast('/', "")
+
+        internal fun sanitizeReference(reference: String): String {
+            val cleaned = reference
+                .trim()
+                .replace(Regex(":(\\d+)(?::\\d+)?$"), "")
+                .trimEnd('/')
+            require(
+                cleaned.isNotBlank() &&
+                    cleaned.length <= 4_096 &&
+                    '\u0000' !in cleaned &&
+                    cleaned.none { it.code in 0..31 || it.code == 127 }
+            ) {
+                "The terminal path is invalid."
+            }
+            return cleaned
+        }
+
+        internal fun relativeToRoot(root: String, candidate: String): String {
+            require(isWithinRoot(root, candidate)) { "The path is outside the project folder." }
+            return when {
+                candidate == root -> ""
+                root == "/" -> candidate.removePrefix("/")
+                else -> candidate.removePrefix("$root/")
+            }
+        }
 
         private fun joinRelative(parent: String, name: String): String =
             if (parent.isEmpty()) name else "$parent/$name"

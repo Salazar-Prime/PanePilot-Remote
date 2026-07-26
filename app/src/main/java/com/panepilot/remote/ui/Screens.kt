@@ -32,9 +32,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -87,6 +89,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -629,7 +632,9 @@ fun SessionWorkspaceScreen(
     onTerminalKey: (TerminalKey) -> Unit,
     notificationTerminalIds: Set<String>,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
-    onBrowseFiles: () -> Unit
+    onBrowseFiles: () -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onOpenPath: (String) -> Unit
 ) {
     val drawerState = rememberDrawerState(
         initialValue = if (selectedSession == null) DrawerValue.Open else DrawerValue.Closed
@@ -683,7 +688,9 @@ fun SessionWorkspaceScreen(
                 onBrowseFiles = onBrowseFiles,
                 onComposerChange = onComposerChange,
                 onSend = onSend,
-                onTerminalKey = onTerminalKey
+                onTerminalKey = onTerminalKey,
+                onOpenUrl = onOpenUrl,
+                onOpenPath = onOpenPath
             )
         }
     }
@@ -984,12 +991,14 @@ fun SessionConsoleScreen(
     onBrowseFiles: () -> Unit,
     onComposerChange: (String) -> Unit,
     onSend: () -> Unit,
-    onTerminalKey: (TerminalKey) -> Unit
+    onTerminalKey: (TerminalKey) -> Unit,
+    onOpenUrl: (String) -> Unit,
+    onOpenPath: (String) -> Unit
 ) {
     val verticalScroll = rememberScrollState()
     val horizontalScroll = rememberScrollState()
     val styledTranscript = remember(transcript) {
-        AnsiTerminalParser.parse(transcript)
+        TerminalLinkifier.annotate(AnsiTerminalParser.parse(transcript))
     }
     LaunchedEffect(transcript) {
         delay(60)
@@ -1054,17 +1063,36 @@ fun SessionConsoleScreen(
                 )
             } else {
                 androidx.compose.foundation.text.selection.SelectionContainer {
-                    Text(
-                        styledTranscript,
-                        color = AnsiTerminalPalette.Foreground,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.5.sp,
-                        lineHeight = 17.sp,
+                    ClickableText(
+                        text = styledTranscript,
+                        style = TextStyle(
+                            color = AnsiTerminalPalette.Foreground,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.5.sp,
+                            lineHeight = 17.sp
+                        ),
                         modifier = Modifier
                             .fillMaxHeight()
                             .horizontalScroll(horizontalScroll)
                             .verticalScroll(verticalScroll)
-                            .padding(14.dp)
+                            .padding(14.dp),
+                        onClick = { offset ->
+                            styledTranscript.getStringAnnotations(
+                                TerminalLinkifier.URL_TAG,
+                                offset,
+                                offset
+                            ).firstOrNull()?.let {
+                                onOpenUrl(it.item)
+                                return@ClickableText
+                            }
+                            styledTranscript.getStringAnnotations(
+                                TerminalLinkifier.PATH_TAG,
+                                offset,
+                                offset
+                            ).firstOrNull()?.let {
+                                onOpenPath(it.item)
+                            }
+                        }
                     )
                 }
             }
@@ -1180,6 +1208,7 @@ fun RemoteFilesScreen(
     rootPath: String,
     relativePath: String,
     files: List<RemoteFileEntry>,
+    highlightedPath: String?,
     isLoading: Boolean,
     isDownloading: Boolean,
     downloadProgress: Int?,
@@ -1188,6 +1217,14 @@ fun RemoteFilesScreen(
     onOpenDirectory: (String) -> Unit,
     onDownload: (RemoteFileEntry) -> Unit
 ) {
+    val fileListState = rememberLazyListState()
+    LaunchedEffect(highlightedPath, files) {
+        val highlightedIndex = files.indexOfFirst { it.relativePath == highlightedPath }
+        if (highlightedIndex >= 0) {
+            fileListState.animateScrollToItem(highlightedIndex)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1269,6 +1306,7 @@ fun RemoteFilesScreen(
 
                 else -> {
                     LazyColumn(
+                        state = fileListState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             start = 16.dp,
@@ -1278,7 +1316,15 @@ fun RemoteFilesScreen(
                         )
                     ) {
                         items(files, key = { it.relativePath }) { file ->
-                            Row(
+                            val highlighted = file.relativePath == highlightedPath
+                            Surface(
+                                color = if (highlighted) SlateRaised else Color.Transparent,
+                                border = if (highlighted) {
+                                    BorderStroke(1.dp, Sky.copy(alpha = 0.75f))
+                                } else {
+                                    null
+                                },
+                                shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable(
@@ -1290,54 +1336,68 @@ fun RemoteFilesScreen(
                                             onDownload(file)
                                         }
                                     }
-                                    .padding(horizontal = 8.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Surface(
-                                    color = if (file.isDirectory) {
-                                        PilotBlue.copy(alpha = 0.18f)
-                                    } else {
-                                        Slate
-                                    },
-                                    shape = RoundedCornerShape(10.dp)
+                                Row(
+                                    modifier = Modifier.padding(
+                                        horizontal = 8.dp,
+                                        vertical = 12.dp
+                                    ),
+                                    verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Icon(
-                                        imageVector = if (file.isDirectory) {
-                                            Icons.Default.Folder
+                                    Surface(
+                                        color = if (file.isDirectory) {
+                                            PilotBlue.copy(alpha = 0.18f)
                                         } else {
-                                            Icons.AutoMirrored.Filled.InsertDriveFile
+                                            Slate
                                         },
-                                        contentDescription = null,
-                                        tint = if (file.isDirectory) Sky else Muted,
-                                        modifier = Modifier.padding(10.dp)
-                                    )
-                                }
-                                Spacer(Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        file.name,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Text(
-                                        if (file.isDirectory) {
-                                            "Folder"
-                                        } else {
-                                            formatFileSize(file.sizeBytes)
-                                        },
-                                        color = Muted,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontSize = 10.sp
-                                    )
-                                }
-                                if (!file.isDirectory) {
-                                    Icon(
-                                        Icons.Default.Download,
-                                        contentDescription = "Download ${file.name}",
-                                        tint = Sky,
-                                        modifier = Modifier.padding(8.dp)
-                                    )
+                                        shape = RoundedCornerShape(10.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (file.isDirectory) {
+                                                Icons.Default.Folder
+                                            } else {
+                                                Icons.AutoMirrored.Filled.InsertDriveFile
+                                            },
+                                            contentDescription = null,
+                                            tint = if (file.isDirectory) Sky else Muted,
+                                            modifier = Modifier.padding(10.dp)
+                                        )
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            file.name,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            when {
+                                                file.isDirectory -> "Folder"
+                                                highlighted -> {
+                                                    "FROM TERMINAL · ${formatFileSize(file.sizeBytes)}"
+                                                }
+
+                                                else -> formatFileSize(file.sizeBytes)
+                                            },
+                                            color = if (highlighted) Sky else Muted,
+                                            fontFamily = FontFamily.Monospace,
+                                            fontSize = 10.sp,
+                                            fontWeight = if (highlighted) {
+                                                FontWeight.Bold
+                                            } else {
+                                                FontWeight.Normal
+                                            }
+                                        )
+                                    }
+                                    if (!file.isDirectory) {
+                                        Icon(
+                                            Icons.Default.Download,
+                                            contentDescription = "Download ${file.name}",
+                                            tint = Sky,
+                                            modifier = Modifier.padding(8.dp)
+                                        )
+                                    }
                                 }
                             }
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)

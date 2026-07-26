@@ -63,6 +63,7 @@ data class AppUiState(
     val remoteFileRoot: String = "",
     val remoteFilePath: String = "",
     val remoteFiles: List<RemoteFileEntry> = emptyList(),
+    val highlightedRemoteFilePath: String? = null,
     val isLoadingFiles: Boolean = false,
     val pendingDownload: RemoteDownloadRequest? = null,
     val isDownloading: Boolean = false,
@@ -237,6 +238,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 remoteFileRoot = "",
                 remoteFilePath = "",
                 remoteFiles = emptyList(),
+                highlightedRemoteFilePath = null,
                 isLoadingFiles = false,
                 pendingDownload = null,
                 isDownloading = false,
@@ -284,11 +286,54 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 remoteFileRoot = session.projectPath,
                 remoteFilePath = "",
                 remoteFiles = emptyList(),
+                highlightedRemoteFilePath = null,
                 pendingDownload = null,
                 error = null
             )
         }
         loadRemoteDirectory("")
+    }
+
+    fun openFilesAtPath(reference: String) {
+        val session = _state.value.selectedSession ?: return
+        consolePolling?.cancel()
+        consolePolling = null
+        fileLoading?.cancel()
+        _state.update {
+            it.copy(
+                screen = AppScreen.Files(session.name),
+                remoteFileRoot = session.projectPath,
+                remoteFilePath = "",
+                remoteFiles = emptyList(),
+                highlightedRemoteFilePath = null,
+                isLoadingFiles = true,
+                pendingDownload = null,
+                error = null
+            )
+        }
+        fileLoading = viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val location = remoteFiles.locate(session.projectPath, reference)
+                    location to remoteFiles.list(
+                        session.projectPath,
+                        location.directoryRelativePath
+                    )
+                }
+            }.onSuccess { (location, files) ->
+                _state.update {
+                    it.copy(
+                        remoteFilePath = location.directoryRelativePath,
+                        remoteFiles = files,
+                        highlightedRemoteFilePath = location.selectedFileRelativePath,
+                        isLoadingFiles = false
+                    )
+                }
+            }.onFailure { error ->
+                _state.update { it.copy(isLoadingFiles = false) }
+                finishWithError(error)
+            }
+        }
     }
 
     fun openRemoteDirectory(relativePath: String) {
@@ -378,6 +423,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun notificationPermissionDenied() {
         showError("Allow PanePilot notifications to enable alerts for this terminal.")
+    }
+
+    fun externalUrlOpenFailed() {
+        showError("No browser is available to open this link.")
     }
 
     fun updateComposer(value: String) {
@@ -470,6 +519,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         remoteFileRoot = "",
                         remoteFilePath = "",
                         remoteFiles = emptyList(),
+                        highlightedRemoteFilePath = null,
                         isLoadingFiles = false,
                         pendingDownload = null,
                         error = null
@@ -504,7 +554,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (!ssh.isConnected || _state.value.isLoadingFiles) return
         val root = _state.value.remoteFileRoot
         fileLoading = viewModelScope.launch {
-            _state.update { it.copy(isLoadingFiles = true, error = null) }
+            _state.update {
+                it.copy(
+                    isLoadingFiles = true,
+                    highlightedRemoteFilePath = null,
+                    error = null
+                )
+            }
             runCatching {
                 withContext(Dispatchers.IO) {
                     remoteFiles.list(root, relativePath)

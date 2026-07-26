@@ -22,6 +22,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
 - Project-scoped remote file browsing with downloads through Android's system file picker
 - Per-terminal alerts when a Codex or Claude session transitions to needing input
+- Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
 The app is a focused monitor and message composer, not a full terminal emulator. It
 does not create, rename, stop, archive, or delete sessions.
@@ -102,6 +103,9 @@ and allow installation from that file source when Android asks.
    file to any location offered by Android.
 7. Open the session side pane and tap a terminal's bell to enable or disable attention
    alerts. On Android 13 and newer, approve the notification permission the first time.
+8. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
+   open its folder in Remote Files; file paths are highlighted and remain one tap away
+   from downloading.
 
 If a legitimate server is rebuilt and its host key changes, edit that server and use
 **Forget saved host key** only after independently verifying the new fingerprint.

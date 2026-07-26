@@ -1,7 +1,9 @@
 package com.panepilot.remote
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -187,7 +189,24 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                                 },
-                                onBrowseFiles = appViewModel::openFiles
+                                onBrowseFiles = appViewModel::openFiles,
+                                onOpenUrl = { value ->
+                                    val uri = Uri.parse(value)
+                                    if (uri.scheme !in setOf("http", "https")) {
+                                        appViewModel.externalUrlOpenFailed()
+                                    } else {
+                                        runCatching {
+                                            startActivity(
+                                                Intent(Intent.ACTION_VIEW, uri).apply {
+                                                    addCategory(Intent.CATEGORY_BROWSABLE)
+                                                }
+                                            )
+                                        }.onFailure {
+                                            appViewModel.externalUrlOpenFailed()
+                                        }
+                                    }
+                                },
+                                onOpenPath = appViewModel::openFilesAtPath
                             )
 
                             is AppScreen.Files -> RemoteFilesScreen(
@@ -195,6 +214,7 @@ class MainActivity : ComponentActivity() {
                                 rootPath = state.remoteFileRoot,
                                 relativePath = state.remoteFilePath,
                                 files = state.remoteFiles,
+                                highlightedPath = state.highlightedRemoteFilePath,
                                 isLoading = state.isLoadingFiles,
                                 isDownloading = state.isDownloading,
                                 downloadProgress = state.downloadProgress,
