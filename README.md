@@ -19,7 +19,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Codex progress state from the tmux pane title
 - Bounded, auto-refreshing pane snapshots with ANSI terminal colors
 - Multiline agent messages sent through a temporary tmux buffer
-- A mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
+- A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
 
 The app is a focused monitor and message composer, not a full terminal emulator. It
 does not create, rename, stop, archive, or delete sessions.

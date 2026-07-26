@@ -985,6 +985,10 @@ fun SessionConsoleScreen(
                 fontWeight = FontWeight.Bold
             )
         }
+        TerminalKeyBar(
+            enabled = session?.paneDead != true,
+            onTerminalKey = onTerminalKey
+        )
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1024,47 +1028,41 @@ fun SessionConsoleScreen(
                 .imePadding()
                 .navigationBarsPadding()
         ) {
-            Column {
-                TerminalKeyBar(
+            Row(
+                modifier = Modifier.padding(12.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                OutlinedTextField(
+                    value = composer,
+                    onValueChange = onComposerChange,
                     enabled = session?.paneDead != true,
-                    onTerminalKey = onTerminalKey
+                    placeholder = {
+                        Text(
+                            if (session?.profile in listOf("codex", "claude")) {
+                                "Message the agent"
+                            } else {
+                                "Send terminal input"
+                            }
+                        )
+                    },
+                    minLines = 1,
+                    maxLines = 4,
+                    modifier = Modifier.weight(1f)
                 )
-                Row(
-                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                    verticalAlignment = Alignment.Bottom
+                Spacer(Modifier.width(10.dp))
+                FilledIconButton(
+                    onClick = onSend,
+                    enabled = composer.isNotBlank() && !isSending && session?.paneDead != true,
+                    modifier = Modifier.size(52.dp)
                 ) {
-                    OutlinedTextField(
-                        value = composer,
-                        onValueChange = onComposerChange,
-                        enabled = session?.paneDead != true,
-                        placeholder = {
-                            Text(
-                                if (session?.profile in listOf("codex", "claude")) {
-                                    "Message the agent"
-                                } else {
-                                    "Send terminal input"
-                                }
-                            )
-                        },
-                        minLines = 1,
-                        maxLines = 4,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    FilledIconButton(
-                        onClick = onSend,
-                        enabled = composer.isNotBlank() && !isSending && session?.paneDead != true,
-                        modifier = Modifier.size(52.dp)
-                    ) {
-                        if (isSending) {
-                            CircularProgressIndicator(
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.size(20.dp),
-                                color = Color.White
-                            )
-                        } else {
-                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
-                        }
+                    if (isSending) {
+                        CircularProgressIndicator(
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(20.dp),
+                            color = Color.White
+                        )
+                    } else {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
                 }
             }
@@ -1080,6 +1078,7 @@ private fun TerminalKeyBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .background(Slate)
             .horizontalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 9.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
