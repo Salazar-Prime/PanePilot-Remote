@@ -54,7 +54,7 @@ class TmuxGateway(private val ssh: SshConnection) {
         val command =
             "${shellQuote(tmux)} display-message -p -t ${shellQuote(target)} " +
                 "${shellQuote("#{pane_title}$FIELD_SEPARATOR#{pane_dead}")} && " +
-                "${shellQuote(tmux)} capture-pane -p -J -S -300 -t ${shellQuote(target)}"
+                "${shellQuote(tmux)} capture-pane -p -e -J -S -300 -t ${shellQuote(target)}"
         val result = ssh.execute(command, maxOutputBytes = 768 * 1024)
         if (result.exitCode != 0) {
             throw IllegalStateException(result.stderr.trim().ifBlank {

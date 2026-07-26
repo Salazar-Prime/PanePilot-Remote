@@ -17,7 +17,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - PanePilot session discovery grouped by project folder
 - A hideable side pane for switching between projects and sessions
 - Codex progress state from the tmux pane title
-- Bounded, auto-refreshing plain-text pane snapshots
+- Bounded, auto-refreshing pane snapshots with ANSI terminal colors
 - Multiline agent messages sent through a temporary tmux buffer
 
 The app is a focused monitor and message composer, not a full terminal emulator. It

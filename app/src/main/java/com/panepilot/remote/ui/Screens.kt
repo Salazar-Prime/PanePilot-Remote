@@ -936,6 +936,9 @@ fun SessionConsoleScreen(
 ) {
     val verticalScroll = rememberScrollState()
     val horizontalScroll = rememberScrollState()
+    val styledTranscript = remember(transcript) {
+        AnsiTerminalParser.parse(transcript)
+    }
     LaunchedEffect(transcript) {
         delay(60)
         verticalScroll.scrollTo(verticalScroll.maxValue)
@@ -983,7 +986,7 @@ fun SessionConsoleScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .background(Color(0xFF080E19))
+                .background(AnsiTerminalPalette.Background)
         ) {
             if (transcript.isBlank()) {
                 Text(
@@ -996,8 +999,8 @@ fun SessionConsoleScreen(
             } else {
                 androidx.compose.foundation.text.selection.SelectionContainer {
                     Text(
-                        transcript,
-                        color = Color(0xFFDCE5F5),
+                        styledTranscript,
+                        color = AnsiTerminalPalette.Foreground,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 11.5.sp,
                         lineHeight = 17.sp,
