@@ -15,6 +15,7 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Optional password storage encrypted with Android Keystore
 - SSH host-key verification and saved `known_hosts`
 - PanePilot session discovery grouped by project folder
+- A hideable side pane for switching between projects and sessions
 - Codex progress state from the tmux pane title
 - Bounded, auto-refreshing plain-text pane snapshots
 - Multiline agent messages sent through a temporary tmux buffer

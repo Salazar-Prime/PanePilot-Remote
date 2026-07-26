@@ -43,11 +43,13 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -55,17 +57,21 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -86,6 +92,7 @@ import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.UUID
 
 @Composable
@@ -593,11 +600,83 @@ fun CredentialsScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SessionListScreen(
+fun SessionWorkspaceScreen(
     profile: ServerProfile?,
     sessions: List<PanePilotSession>,
+    selectedSession: PanePilotSession?,
+    transcript: String,
+    paneTitle: String,
+    composer: String,
+    isRefreshing: Boolean,
+    isSending: Boolean,
+    onRefresh: () -> Unit,
+    onDisconnect: () -> Unit,
+    onOpenSession: (String) -> Unit,
+    onComposerChange: (String) -> Unit,
+    onSend: () -> Unit
+) {
+    val drawerState = rememberDrawerState(
+        initialValue = if (selectedSession == null) DrawerValue.Open else DrawerValue.Closed
+    )
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(selectedSession?.terminalId) {
+        if (selectedSession == null) {
+            drawerState.open()
+        }
+    }
+
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        gesturesEnabled = true,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = Ink,
+                drawerContentColor = MaterialTheme.colorScheme.onBackground
+            ) {
+                SessionDrawerContent(
+                    profile = profile,
+                    sessions = sessions,
+                    selectedSession = selectedSession,
+                    isRefreshing = isRefreshing,
+                    onRefresh = onRefresh,
+                    onDisconnect = onDisconnect,
+                    onOpenSession = { sessionName ->
+                        onOpenSession(sessionName)
+                        scope.launch { drawerState.close() }
+                    }
+                )
+            }
+        }
+    ) {
+        if (selectedSession == null) {
+            EmptySessionWorkspace(
+                profile = profile,
+                onShowSessions = { scope.launch { drawerState.open() } }
+            )
+        } else {
+            SessionConsoleScreen(
+                session = selectedSession,
+                transcript = transcript,
+                paneTitle = paneTitle,
+                composer = composer,
+                isSending = isSending,
+                onShowSessions = { scope.launch { drawerState.open() } },
+                onComposerChange = onComposerChange,
+                onSend = onSend
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SessionDrawerContent(
+    profile: ServerProfile?,
+    sessions: List<PanePilotSession>,
+    selectedSession: PanePilotSession?,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onDisconnect: () -> Unit,
@@ -611,7 +690,7 @@ fun SessionListScreen(
     ) {
         ScreenHeader(
             eyebrow = "SSH / ${profile?.name?.uppercase().orEmpty()}",
-            title = "Live sessions",
+            title = "Sessions",
             action = {
                 IconButton(onClick = onRefresh, enabled = !isRefreshing) {
                     if (isRefreshing) {
@@ -629,6 +708,15 @@ fun SessionListScreen(
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Disconnect")
                 }
             }
+        )
+        Text(
+            if (sessions.size == 1) "1 LIVE TMUX SESSION" else "${sessions.size} LIVE TMUX SESSIONS",
+            color = Muted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
         )
         if (sessions.isEmpty() && !isRefreshing) {
             Box(
@@ -686,7 +774,11 @@ fun SessionListScreen(
                         }
                     }
                     items(projectSessions, key = { it.terminalId }) { session ->
-                        SessionCard(session = session, onClick = { onOpenSession(session.name) })
+                        SessionCard(
+                            session = session,
+                            selected = session.terminalId == selectedSession?.terminalId,
+                            onClick = { onOpenSession(session.name) }
+                        )
                     }
                 }
             }
@@ -695,12 +787,79 @@ fun SessionListScreen(
 }
 
 @Composable
-private fun SessionCard(session: PanePilotSession, onClick: () -> Unit) {
+private fun EmptySessionWorkspace(
+    profile: ServerProfile?,
+    onShowSessions: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        SessionWorkspaceHeader(
+            title = "Live sessions",
+            subtitle = profile?.name,
+            onShowSessions = onShowSessions
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(28.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Surface(
+                    color = Slate,
+                    shape = RoundedCornerShape(18.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Icon(
+                        Icons.Default.Menu,
+                        contentDescription = null,
+                        tint = Sky,
+                        modifier = Modifier.padding(18.dp)
+                    )
+                }
+                Spacer(Modifier.height(20.dp))
+                Text(
+                    "Choose a session",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Your projects and live tmux sessions are in the side pane.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(20.dp))
+                OutlinedButton(onClick = onShowSessions) {
+                    Icon(Icons.Default.Menu, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Show sessions")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionCard(
+    session: PanePilotSession,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
     val stateColor = stateColor(session.state)
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = Slate,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        color = if (selected) SlateRaised else Slate,
+        border = BorderStroke(
+            width = if (selected) 1.5.dp else 1.dp,
+            color = if (selected) Sky.copy(alpha = 0.72f) else {
+                MaterialTheme.colorScheme.outlineVariant
+            }
+        ),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = !session.paneDead, onClick = onClick)
@@ -771,7 +930,7 @@ fun SessionConsoleScreen(
     paneTitle: String,
     composer: String,
     isSending: Boolean,
-    onBack: () -> Unit,
+    onShowSessions: () -> Unit,
     onComposerChange: (String) -> Unit,
     onSend: () -> Unit
 ) {
@@ -788,9 +947,9 @@ fun SessionConsoleScreen(
             .statusBarsPadding()
             .imePadding()
     ) {
-        BackHeader(
+        SessionWorkspaceHeader(
             title = session?.name ?: "Session",
-            onBack = onBack,
+            onShowSessions = onShowSessions,
             subtitle = paneTitle.takeIf { it.isNotBlank() }
         )
         Row(
@@ -895,6 +1054,43 @@ fun SessionConsoleScreen(
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SessionWorkspaceHeader(
+    title: String,
+    subtitle: String?,
+    onShowSessions: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onShowSessions) {
+            Icon(Icons.Default.Menu, contentDescription = "Show sessions")
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            subtitle?.let {
+                Text(
+                    it,
+                    color = Sky,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }

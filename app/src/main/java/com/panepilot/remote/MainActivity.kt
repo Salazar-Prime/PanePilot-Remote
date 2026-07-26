@@ -24,8 +24,7 @@ import com.panepilot.remote.ui.HostKeyDialog
 import com.panepilot.remote.ui.PanePilotTheme
 import com.panepilot.remote.ui.ServerEditorScreen
 import com.panepilot.remote.ui.ServerListScreen
-import com.panepilot.remote.ui.SessionConsoleScreen
-import com.panepilot.remote.ui.SessionListScreen
+import com.panepilot.remote.ui.SessionWorkspaceScreen
 import com.panepilot.remote.ui.Ink
 
 class MainActivity : ComponentActivity() {
@@ -108,22 +107,18 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
 
-                            AppScreen.Sessions -> SessionListScreen(
+                            AppScreen.Sessions, is AppScreen.Console -> SessionWorkspaceScreen(
                                 profile = state.connectedProfile,
                                 sessions = state.sessions,
-                                isRefreshing = state.isBusy,
-                                onRefresh = appViewModel::refreshSessions,
-                                onDisconnect = appViewModel::disconnect,
-                                onOpenSession = appViewModel::openConsole
-                            )
-
-                            is AppScreen.Console -> SessionConsoleScreen(
-                                session = state.selectedSession,
+                                selectedSession = state.selectedSession,
                                 transcript = state.transcript,
                                 paneTitle = state.paneTitle,
                                 composer = state.composer,
+                                isRefreshing = state.isBusy,
                                 isSending = state.isSending,
-                                onBack = appViewModel::goBack,
+                                onRefresh = appViewModel::refreshSessions,
+                                onDisconnect = appViewModel::disconnect,
+                                onOpenSession = appViewModel::openConsole,
                                 onComposerChange = appViewModel::updateComposer,
                                 onSend = appViewModel::sendMessage
                             )
