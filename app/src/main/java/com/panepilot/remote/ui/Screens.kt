@@ -91,6 +91,7 @@ import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
+import com.panepilot.remote.model.TerminalKey
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -615,7 +616,8 @@ fun SessionWorkspaceScreen(
     onDisconnect: () -> Unit,
     onOpenSession: (String) -> Unit,
     onComposerChange: (String) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    onTerminalKey: (TerminalKey) -> Unit
 ) {
     val drawerState = rememberDrawerState(
         initialValue = if (selectedSession == null) DrawerValue.Open else DrawerValue.Closed
@@ -665,7 +667,8 @@ fun SessionWorkspaceScreen(
                 isSending = isSending,
                 onShowSessions = { scope.launch { drawerState.open() } },
                 onComposerChange = onComposerChange,
-                onSend = onSend
+                onSend = onSend,
+                onTerminalKey = onTerminalKey
             )
         }
     }
@@ -932,7 +935,8 @@ fun SessionConsoleScreen(
     isSending: Boolean,
     onShowSessions: () -> Unit,
     onComposerChange: (String) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    onTerminalKey: (TerminalKey) -> Unit
 ) {
     val verticalScroll = rememberScrollState()
     val horizontalScroll = rememberScrollState()
@@ -948,7 +952,6 @@ fun SessionConsoleScreen(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
-            .imePadding()
     ) {
         SessionWorkspaceHeader(
             title = session?.name ?: "Session",
@@ -1018,44 +1021,105 @@ fun SessionConsoleScreen(
             tonalElevation = 4.dp,
             modifier = Modifier
                 .fillMaxWidth()
+                .imePadding()
                 .navigationBarsPadding()
         ) {
-            Row(
-                modifier = Modifier.padding(12.dp),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                OutlinedTextField(
-                    value = composer,
-                    onValueChange = onComposerChange,
+            Column {
+                TerminalKeyBar(
                     enabled = session?.paneDead != true,
-                    placeholder = {
-                        Text(
-                            if (session?.profile in listOf("codex", "claude")) {
-                                "Message the agent"
-                            } else {
-                                "Send terminal input"
-                            }
-                        )
-                    },
-                    minLines = 1,
-                    maxLines = 4,
-                    modifier = Modifier.weight(1f)
+                    onTerminalKey = onTerminalKey
                 )
-                Spacer(Modifier.width(10.dp))
-                FilledIconButton(
-                    onClick = onSend,
-                    enabled = composer.isNotBlank() && !isSending && session?.paneDead != true,
-                    modifier = Modifier.size(52.dp)
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                    verticalAlignment = Alignment.Bottom
                 ) {
-                    if (isSending) {
-                        CircularProgressIndicator(
-                            strokeWidth = 2.dp,
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White
-                        )
-                    } else {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                    OutlinedTextField(
+                        value = composer,
+                        onValueChange = onComposerChange,
+                        enabled = session?.paneDead != true,
+                        placeholder = {
+                            Text(
+                                if (session?.profile in listOf("codex", "claude")) {
+                                    "Message the agent"
+                                } else {
+                                    "Send terminal input"
+                                }
+                            )
+                        },
+                        minLines = 1,
+                        maxLines = 4,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    FilledIconButton(
+                        onClick = onSend,
+                        enabled = composer.isNotBlank() && !isSending && session?.paneDead != true,
+                        modifier = Modifier.size(52.dp)
+                    ) {
+                        if (isSending) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White
+                            )
+                        } else {
+                            Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalKeyBar(
+    enabled: Boolean,
+    onTerminalKey: (TerminalKey) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        TerminalKey.entries.forEach { key ->
+            val shape = RoundedCornerShape(10.dp)
+            val emphasized = key == TerminalKey.ENTER
+            Surface(
+                color = when {
+                    !enabled -> Ink.copy(alpha = 0.42f)
+                    emphasized -> PilotBlue.copy(alpha = 0.24f)
+                    else -> Ink
+                },
+                border = BorderStroke(
+                    1.dp,
+                    if (emphasized) PilotBlue.copy(alpha = 0.7f) else {
+                        MaterialTheme.colorScheme.outline
+                    }
+                ),
+                shape = shape,
+                modifier = Modifier
+                    .height(40.dp)
+                    .clip(shape)
+                    .clickable(enabled = enabled) { onTerminalKey(key) }
+            ) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier.padding(horizontal = 13.dp)
+                ) {
+                    Text(
+                        key.label,
+                        color = if (enabled) {
+                            if (emphasized) Sky else MaterialTheme.colorScheme.onSurface
+                        } else {
+                            Muted.copy(alpha = 0.55f)
+                        },
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
             }
         }

@@ -120,7 +120,8 @@ class MainActivity : ComponentActivity() {
                                 onDisconnect = appViewModel::disconnect,
                                 onOpenSession = appViewModel::openConsole,
                                 onComposerChange = appViewModel::updateComposer,
-                                onSend = appViewModel::sendMessage
+                                onSend = appViewModel::sendMessage,
+                                onTerminalKey = appViewModel::sendTerminalKey
                             )
                         }
                     }

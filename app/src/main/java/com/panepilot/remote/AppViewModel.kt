@@ -10,6 +10,7 @@ import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.ServerProfile
+import com.panepilot.remote.model.TerminalKey
 import com.panepilot.remote.ssh.SshConnection
 import com.panepilot.remote.ssh.TmuxGateway
 import kotlinx.coroutines.Dispatchers
@@ -251,6 +252,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update { it.copy(isSending = false) }
                 finishWithError(error)
             }
+        }
+    }
+
+    fun sendTerminalKey(key: TerminalKey) {
+        val sessionName = _state.value.selectedSession?.name ?: return
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) { tmux.sendKey(sessionName, key) }
+            }.onSuccess {
+                delay(120)
+                refreshConsole(sessionName, reportError = true)
+            }.onFailure(::finishWithError)
         }
     }
 

@@ -31,6 +31,19 @@ enum class SessionState {
     STOPPED
 }
 
+enum class TerminalKey(val label: String) {
+    ENTER("Enter"),
+    ESCAPE("Esc"),
+    TAB("Tab"),
+    ARROW_UP("↑"),
+    ARROW_DOWN("↓"),
+    ARROW_LEFT("←"),
+    ARROW_RIGHT("→"),
+    CTRL_C("Ctrl+C"),
+    CTRL_D("Ctrl+D"),
+    CTRL_L("Ctrl+L")
+}
+
 data class PanePilotSession(
     val name: String,
     val attachedClients: Int,

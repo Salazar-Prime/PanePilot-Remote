@@ -1,6 +1,7 @@
 package com.panepilot.remote.ssh
 
 import com.panepilot.remote.model.SessionState
+import com.panepilot.remote.model.TerminalKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -92,5 +93,33 @@ class TmuxGatewayTest {
         assertTrue(quoted.endsWith("'"))
         assertTrue(quoted.contains("'\\''"))
         assertFalse(quoted.contains("\n"))
+    }
+
+    @Test
+    fun `message submit waits after paste and sends an explicit carriage return`() {
+        val command = TmuxGateway.buildSendCommand(
+            tmux = "/usr/bin/tmux",
+            target = "=Codex:",
+            bufferName = "mobile-buffer"
+        )
+
+        val pasteIndex = command.indexOf("paste-buffer")
+        val delayIndex = command.indexOf("sleep 0.20")
+        val submitIndex = command.indexOf("send-keys")
+        assertTrue(pasteIndex >= 0)
+        assertTrue(delayIndex > pasteIndex)
+        assertTrue(submitIndex > delayIndex)
+        assertTrue(command.endsWith(" C-m"))
+    }
+
+    @Test
+    fun `mobile terminal buttons map only to exact tmux key names`() {
+        assertEquals("C-m", TmuxGateway.tmuxKeyName(TerminalKey.ENTER))
+        assertEquals("Escape", TmuxGateway.tmuxKeyName(TerminalKey.ESCAPE))
+        assertEquals("Tab", TmuxGateway.tmuxKeyName(TerminalKey.TAB))
+        assertEquals("Up", TmuxGateway.tmuxKeyName(TerminalKey.ARROW_UP))
+        assertEquals("C-c", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_C))
+        assertEquals("C-d", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_D))
+        assertEquals("C-l", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_L))
     }
 }

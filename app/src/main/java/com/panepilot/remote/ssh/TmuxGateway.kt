@@ -2,6 +2,7 @@ package com.panepilot.remote.ssh
 
 import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.SessionState
+import com.panepilot.remote.model.TerminalKey
 import java.util.Base64
 import java.util.UUID
 
@@ -86,15 +87,25 @@ class TmuxGateway(private val ssh: SshConnection) {
         val tmux = resolveTmux()
         val target = "=$sessionName:"
         val bufferName = "panepilot-mobile-${UUID.randomUUID()}"
-        val command =
-            "${shellQuote(tmux)} load-buffer -b ${shellQuote(bufferName)} - && " +
-                "${shellQuote(tmux)} paste-buffer -d -b ${shellQuote(bufferName)} " +
-                "-t ${shellQuote(target)} && " +
-                "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} Enter"
+        val command = buildSendCommand(tmux, target, bufferName)
         val result = ssh.execute(command, stdin = payload, maxOutputBytes = 64 * 1024)
         if (result.exitCode != 0) {
             throw IllegalStateException(result.stderr.trim().ifBlank {
                 "Tmux could not send the message."
+            })
+        }
+    }
+
+    fun sendKey(sessionName: String, key: TerminalKey) {
+        val tmux = resolveTmux()
+        val target = "=$sessionName:"
+        val command =
+            "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} " +
+                shellQuote(tmuxKeyName(key))
+        val result = ssh.execute(command, maxOutputBytes = 64 * 1024)
+        if (result.exitCode != 0) {
+            throw IllegalStateException(result.stderr.trim().ifBlank {
+                "Tmux could not send ${key.label}."
             })
         }
     }
@@ -139,6 +150,29 @@ class TmuxGateway(private val ssh: SshConnection) {
                 "*) exit 127 ;; esac; printf '%s\\n' \"\$panepilot_tmux\""
 
         fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
+        internal fun buildSendCommand(
+            tmux: String,
+            target: String,
+            bufferName: String
+        ): String =
+            "${shellQuote(tmux)} load-buffer -b ${shellQuote(bufferName)} - && " +
+                "${shellQuote(tmux)} paste-buffer -d -b ${shellQuote(bufferName)} " +
+                "-t ${shellQuote(target)} && sleep 0.20 && " +
+                "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} C-m"
+
+        internal fun tmuxKeyName(key: TerminalKey): String = when (key) {
+            TerminalKey.ENTER -> "C-m"
+            TerminalKey.ESCAPE -> "Escape"
+            TerminalKey.TAB -> "Tab"
+            TerminalKey.ARROW_UP -> "Up"
+            TerminalKey.ARROW_DOWN -> "Down"
+            TerminalKey.ARROW_LEFT -> "Left"
+            TerminalKey.ARROW_RIGHT -> "Right"
+            TerminalKey.CTRL_C -> "C-c"
+            TerminalKey.CTRL_D -> "C-d"
+            TerminalKey.CTRL_L -> "C-l"
+        }
 
         fun parseSessionList(output: String): List<PanePilotSession> {
             return output.lineSequence()
