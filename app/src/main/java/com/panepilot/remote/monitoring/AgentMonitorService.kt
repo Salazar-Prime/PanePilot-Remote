@@ -22,6 +22,7 @@ import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.notifications.AttentionNotifier
+import com.panepilot.remote.notifications.NotificationGroups
 import com.panepilot.remote.notifications.newAttentionEvents
 import com.panepilot.remote.notifications.noLongerNeedsAttention
 import com.panepilot.remote.ssh.SshConnection
@@ -290,6 +291,7 @@ class AgentMonitorService : Service() {
     }
 
     private fun createMonitoringChannel() {
+        NotificationGroups.ensureCreated(notificationManager)
         notificationManager.createNotificationChannel(
             NotificationChannel(
                 MONITOR_CHANNEL_ID,
@@ -297,9 +299,11 @@ class AgentMonitorService : Service() {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Keeps SSH agent-attention monitoring active"
+                group = NotificationGroups.CONNECTION_CHANNEL_GROUP_ID
                 setShowBadge(false)
             }
         )
+        notificationManager.deleteNotificationChannel(LEGACY_MONITOR_CHANNEL_ID)
     }
 
     private fun startAsForeground(title: String, detail: String) {
@@ -359,6 +363,7 @@ class AgentMonitorService : Service() {
             .setContentTitle(title)
             .setContentText(detail)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .setGroup(NotificationGroups.CONNECTION_SHADE_GROUP_KEY)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp)
@@ -395,7 +400,8 @@ class AgentMonitorService : Service() {
         private const val EXTRA_PROFILE_ID = "profile_id"
         private const val EXTRA_PASSWORD = "password"
         private const val EXTRA_KEY_PASSPHRASE = "key_passphrase"
-        private const val MONITOR_CHANNEL_ID = "background-monitor"
+        private const val MONITOR_CHANNEL_ID = "background-monitor-v2"
+        private const val LEGACY_MONITOR_CHANNEL_ID = "background-monitor"
         private const val MONITOR_NOTIFICATION_ID = 8_421
         private const val POLL_INTERVAL_MS = 6_000L
         private const val PAUSED_RETRY_MS = 30_000L

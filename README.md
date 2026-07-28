@@ -25,7 +25,10 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Project-scoped remote file browsing with downloads through Android's system file picker
 - Per-terminal alerts when a Codex or Claude session needs input or finishes a response
 - A dedicated unread attention queue that stays above pinned and sorted terminals
-- Exact-session notification links and an in-app test-alert action
+- Separate Android categories and notification groups for connection status, agent
+  completions, and needs-input alerts
+- Exact-session notification links and a persistent in-app history of the last 200
+  agent alerts sent on the phone
 - Foreground SSH/tmux monitoring that continues after leaving or swiping away the app
 - Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
@@ -111,10 +114,11 @@ and allow installation from that file source when Android asks.
    without disconnecting the others.
 8. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
    input or finishes a response moves into the **Needs attention** section at the top
-   of the list until you open it. Use **Test alert** to verify Android delivery. The
-   persistent monitor keeps every connected server online and stops an individual
-   connection only when you explicitly disconnect it. On Android 13 and newer,
-   approve the notification permission the first time.
+   of the list until you open it. Open **History** to review alerts sent since version
+   0.6.0; tapping a history entry opens its exact server and terminal. The persistent
+   monitor keeps every connected server online and stops an individual connection
+   only when you explicitly disconnect it. On Android 13 and newer, approve the
+   notification permission the first time.
 9. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
    open its folder in Remote Files; file paths are highlighted and remain one tap away
    from downloading.
@@ -143,6 +147,12 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
   and attention polling active after leaving or swiping away the app, even when no
   terminal bell is enabled. Its **Stop all** action disables terminal bells and ends
   all background monitoring; disconnecting one server leaves the others connected.
+- Android keeps that foreground connection status separate from agent activity.
+  Response completions and needs-input events have their own configurable categories
+  and appear in a dedicated agent-activity group in the notification shade.
+- Successfully posted agent alerts are saved in private app storage, newest first,
+  and capped at 200 entries. The persistent connection-status notification is not
+  included in this history.
 - Pressing Android Back from the session list backgrounds PanePilot instead of
   disconnecting. If Android recreates the activity while the service remains active,
   PanePilot restores the monitored SSH connection automatically.

@@ -8,6 +8,7 @@ import com.panepilot.remote.data.AttentionPreferenceStore
 import com.panepilot.remote.data.AttentionStateStore
 import com.panepilot.remote.data.BackgroundMonitorStore
 import com.panepilot.remote.data.CredentialStore
+import com.panepilot.remote.data.NotificationHistoryStore
 import com.panepilot.remote.data.ProfileStore
 import com.panepilot.remote.data.SessionStateStore
 import com.panepilot.remote.data.TerminalPreferenceStore
@@ -24,6 +25,7 @@ import com.panepilot.remote.monitoring.AgentMonitorService
 import com.panepilot.remote.notifications.AttentionEvent
 import com.panepilot.remote.notifications.AttentionEventType
 import com.panepilot.remote.notifications.AttentionNotifier
+import com.panepilot.remote.notifications.NotificationHistoryEntry
 import com.panepilot.remote.notifications.newAttentionEvents
 import com.panepilot.remote.notifications.noLongerNeedsAttention
 import com.panepilot.remote.ssh.RemoteFileGateway
@@ -73,6 +75,7 @@ data class AppUiState(
     val unreadAttentionTerminalIds: Set<String> = emptySet(),
     val pinnedTerminalIds: Set<String> = emptySet(),
     val terminalSortMode: TerminalSortMode = TerminalSortMode.ACTIVITY,
+    val notificationHistory: List<NotificationHistoryEntry> = emptyList(),
     val remoteFileRoot: String = "",
     val remoteFilePath: String = "",
     val remoteFiles: List<RemoteFileEntry> = emptyList(),
@@ -110,6 +113,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val backgroundMonitorStore = BackgroundMonitorStore(application)
     private val sessionStateStore = SessionStateStore(application)
     private val terminalPreferences = TerminalPreferenceStore(application)
+    private val notificationHistoryStore = NotificationHistoryStore(application)
     private val attentionNotifier = AttentionNotifier(application)
     private val pendingTrust = AtomicReference<PendingTrust?>(null)
     private val connections = linkedMapOf<String, LiveConnection>()
@@ -117,7 +121,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _state = MutableStateFlow(
         AppUiState(
             profiles = profileStore.load(),
-            connectedProfileIds = backgroundMonitorStore.monitoredProfileIds()
+            connectedProfileIds = backgroundMonitorStore.monitoredProfileIds(),
+            notificationHistory = notificationHistoryStore.load()
         )
     )
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -558,6 +563,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 profile,
                 AttentionEvent(session, AttentionEventType.NEEDS_INPUT)
             )
+            refreshNotificationHistory()
         } else if (!enabled) {
             attentionState.markRead(profile.id, terminalId)
             attentionNotifier.cancel(profile.id, terminalId)
@@ -596,14 +602,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(terminalSortMode = sortMode) }
     }
 
-    fun testAttentionNotification() {
-        val profile = _state.value.connectedProfile ?: return
-        if (attentionNotifier.showTest(profile)) {
-            _state.update { it.copy(notice = "Test alert sent.") }
-        } else {
-            showError(
-                "Agent alerts are disabled in Android notification settings for PanePilot."
-            )
+    fun refreshNotificationHistory() {
+        _state.update {
+            it.copy(notificationHistory = notificationHistoryStore.load())
         }
     }
 
@@ -794,6 +795,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     terminalPreferences.pinnedTerminalIds(connection.profile.id),
                 terminalSortMode =
                     terminalPreferences.sortMode(connection.profile.id),
+                notificationHistory = notificationHistoryStore.load(),
                 remoteFileRoot = "",
                 remoteFilePath = "",
                 remoteFiles = emptyList(),
@@ -1019,7 +1021,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }.orEmpty(),
                 terminalSortMode = profile?.let {
                     terminalPreferences.sortMode(it.id)
-                } ?: TerminalSortMode.ACTIVITY
+                } ?: TerminalSortMode.ACTIVITY,
+                notificationHistory = notificationHistoryStore.load()
             )
         }
     }

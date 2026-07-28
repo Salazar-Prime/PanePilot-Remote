@@ -68,6 +68,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
@@ -106,8 +107,13 @@ import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
 import com.panepilot.remote.model.TerminalSortMode
+import com.panepilot.remote.notifications.AttentionEventType
+import com.panepilot.remote.notifications.NotificationHistoryEntry
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
 
@@ -664,10 +670,12 @@ fun SessionWorkspaceScreen(
     unreadAttentionTerminalIds: Set<String>,
     pinnedTerminalIds: Set<String>,
     terminalSortMode: TerminalSortMode,
+    notificationHistory: List<NotificationHistoryEntry>,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
     onTogglePin: (terminalId: String, pinned: Boolean) -> Unit,
     onSetSortMode: (TerminalSortMode) -> Unit,
-    onTestNotification: () -> Unit,
+    onRefreshNotificationHistory: () -> Unit,
+    onOpenNotificationHistoryEntry: (profileId: String, terminalId: String) -> Unit,
     onBrowseFiles: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onOpenPath: (String) -> Unit
@@ -676,6 +684,7 @@ fun SessionWorkspaceScreen(
         initialValue = if (selectedSession == null) DrawerValue.Open else DrawerValue.Closed
     )
     val scope = rememberCoroutineScope()
+    var showNotificationHistory by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(selectedSession?.terminalId) {
         if (selectedSession == null) {
@@ -706,10 +715,14 @@ fun SessionWorkspaceScreen(
                     unreadAttentionTerminalIds = unreadAttentionTerminalIds,
                     pinnedTerminalIds = pinnedTerminalIds,
                     terminalSortMode = terminalSortMode,
+                    notificationHistoryCount = notificationHistory.size,
                     onToggleNotifications = onToggleNotifications,
                     onTogglePin = onTogglePin,
                     onSetSortMode = onSetSortMode,
-                    onTestNotification = onTestNotification,
+                    onShowNotificationHistory = {
+                        onRefreshNotificationHistory()
+                        showNotificationHistory = true
+                    },
                     onOpenSession = { sessionName ->
                         onOpenSession(sessionName)
                         scope.launch { drawerState.close() }
@@ -740,6 +753,17 @@ fun SessionWorkspaceScreen(
             )
         }
     }
+    if (showNotificationHistory) {
+        NotificationHistorySheet(
+            entries = notificationHistory,
+            onDismiss = { showNotificationHistory = false },
+            onOpenEntry = { entry ->
+                showNotificationHistory = false
+                onOpenNotificationHistoryEntry(entry.profileId, entry.terminalId)
+                scope.launch { drawerState.close() }
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -759,10 +783,11 @@ private fun SessionDrawerContent(
     unreadAttentionTerminalIds: Set<String>,
     pinnedTerminalIds: Set<String>,
     terminalSortMode: TerminalSortMode,
+    notificationHistoryCount: Int,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
     onTogglePin: (terminalId: String, pinned: Boolean) -> Unit,
     onSetSortMode: (TerminalSortMode) -> Unit,
-    onTestNotification: () -> Unit,
+    onShowNotificationHistory: () -> Unit,
     onOpenSession: (String) -> Unit
 ) {
     Column(
@@ -853,9 +878,9 @@ private fun SessionDrawerContent(
         ) {
             Text(
                 when (notificationTerminalIds.size) {
-                    0 -> "BACKGROUND SSH · ACTIVE"
-                    1 -> "BACKGROUND ALERTS · 1 TERMINAL"
-                    else -> "BACKGROUND ALERTS · ${notificationTerminalIds.size} TERMINALS"
+                    0 -> "TERMINAL ALERTS · OFF"
+                    1 -> "TERMINAL ALERTS · 1 TERMINAL"
+                    else -> "TERMINAL ALERTS · ${notificationTerminalIds.size} TERMINALS"
                 },
                 color = if (notificationTerminalIds.isEmpty()) Success else Attention,
                 fontFamily = FontFamily.Monospace,
@@ -864,8 +889,15 @@ private fun SessionDrawerContent(
                 letterSpacing = 0.8.sp,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = onTestNotification) {
-                Text("Test alert")
+            TextButton(onClick = onShowNotificationHistory) {
+                Text(
+                    if (notificationHistoryCount == 0) {
+                        "History"
+                    } else {
+                        "History · ${notificationHistoryCount.coerceAtMost(99)}" +
+                            if (notificationHistoryCount > 99) "+" else ""
+                    }
+                )
             }
         }
         Text(
@@ -1002,6 +1034,198 @@ private fun SessionDrawerContent(
         }
     }
 }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun NotificationHistorySheet(
+    entries: List<NotificationHistoryEntry>,
+    onDismiss: () -> Unit,
+    onOpenEntry: (NotificationHistoryEntry) -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Ink,
+        contentColor = MaterialTheme.colorScheme.onBackground
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxHeight(0.88f)
+                .navigationBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    color = Slate,
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Icon(
+                        Icons.Default.Notifications,
+                        contentDescription = null,
+                        tint = Sky,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+                Spacer(Modifier.width(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Alert history",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "LAST 200 ALERTS SENT ON THIS PHONE",
+                        color = Muted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.7.sp
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (entries.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(28.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            "No alerts sent yet",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Completion and needs-input alerts will appear here.",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        start = 20.dp,
+                        end = 20.dp,
+                        top = 16.dp,
+                        bottom = 28.dp
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(entries, key = { it.id }) { entry ->
+                        NotificationHistoryCard(
+                            entry = entry,
+                            onClick = { onOpenEntry(entry) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NotificationHistoryCard(
+    entry: NotificationHistoryEntry,
+    onClick: () -> Unit
+) {
+    val eventColor = when (entry.type) {
+        AttentionEventType.NEEDS_INPUT -> Attention
+        AttentionEventType.RESPONSE_READY -> Sky
+    }
+    Surface(
+        color = Slate,
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+            Box(
+                modifier = Modifier
+                    .width(5.dp)
+                    .fillMaxHeight()
+                    .background(eventColor)
+            )
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 15.dp, vertical = 13.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (entry.type) {
+                            AttentionEventType.NEEDS_INPUT -> "NEEDS INPUT"
+                            AttentionEventType.RESPONSE_READY -> "RESPONSE FINISHED"
+                        },
+                        color = eventColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.7.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        formatNotificationTime(entry.sentAtMillis),
+                        color = Muted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 10.sp
+                    )
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    entry.title,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "${entry.profileName} · ${entry.projectName}",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (entry.paneTitle.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        entry.paneTitle,
+                        color = Sky,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "Open terminal",
+                    color = eventColor,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        }
+    }
+}
+
+private fun formatNotificationTime(timestampMillis: Long): String =
+    runCatching {
+        DateTimeFormatter
+            .ofPattern("MMM d · h:mm a", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+            .format(Instant.ofEpochMilli(timestampMillis))
+    }.getOrDefault("Earlier")
 
 @Composable
 private fun EmptySessionWorkspace(

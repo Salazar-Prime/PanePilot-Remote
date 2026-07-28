@@ -3,6 +3,7 @@ package com.panepilot.remote.notifications
 import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.SessionState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,6 +65,26 @@ class AttentionTransitionsTest {
         assertEquals(
             listOf("terminal-1", "terminal-2"),
             resolved.map { it.terminalId }
+        )
+    }
+
+    @Test
+    fun completionAndNeedsInputUseDistinctAndroidChannelsAndIds() {
+        assertNotEquals(
+            AttentionNotifier.channelIdFor(AttentionEventType.NEEDS_INPUT),
+            AttentionNotifier.channelIdFor(AttentionEventType.RESPONSE_READY)
+        )
+        assertNotEquals(
+            AttentionNotifier.notificationId(
+                "profile",
+                "terminal",
+                AttentionEventType.NEEDS_INPUT
+            ),
+            AttentionNotifier.notificationId(
+                "profile",
+                "terminal",
+                AttentionEventType.RESPONSE_READY
+            )
         )
     }
 

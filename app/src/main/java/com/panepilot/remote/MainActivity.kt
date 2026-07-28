@@ -211,6 +211,7 @@ class MainActivity : ComponentActivity() {
                                     state.unreadAttentionTerminalIds,
                                 pinnedTerminalIds = state.pinnedTerminalIds,
                                 terminalSortMode = state.terminalSortMode,
+                                notificationHistory = state.notificationHistory,
                                 onToggleNotifications = { terminalId, enabled ->
                                     if (!enabled) {
                                         appViewModel.setAttentionNotificationsEnabled(
@@ -235,7 +236,10 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onTogglePin = appViewModel::setTerminalPinned,
                                 onSetSortMode = appViewModel::setTerminalSortMode,
-                                onTestNotification = appViewModel::testAttentionNotification,
+                                onRefreshNotificationHistory =
+                                    appViewModel::refreshNotificationHistory,
+                                onOpenNotificationHistoryEntry =
+                                    appViewModel::openAttentionTarget,
                                 onBrowseFiles = appViewModel::openFiles,
                                 onOpenUrl = { value ->
                                     val uri = Uri.parse(value)
