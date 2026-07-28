@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -104,6 +105,7 @@ import com.panepilot.remote.model.RemoteFileEntry
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
+import com.panepilot.remote.model.TerminalSortMode
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -659,7 +661,13 @@ fun SessionWorkspaceScreen(
     onSend: () -> Unit,
     onTerminalKey: (TerminalKey) -> Unit,
     notificationTerminalIds: Set<String>,
+    unreadAttentionTerminalIds: Set<String>,
+    pinnedTerminalIds: Set<String>,
+    terminalSortMode: TerminalSortMode,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
+    onTogglePin: (terminalId: String, pinned: Boolean) -> Unit,
+    onSetSortMode: (TerminalSortMode) -> Unit,
+    onTestNotification: () -> Unit,
     onBrowseFiles: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onOpenPath: (String) -> Unit
@@ -695,7 +703,13 @@ fun SessionWorkspaceScreen(
                     onSwitchServer = onSwitchServer,
                     onDisconnect = onDisconnect,
                     notificationTerminalIds = notificationTerminalIds,
+                    unreadAttentionTerminalIds = unreadAttentionTerminalIds,
+                    pinnedTerminalIds = pinnedTerminalIds,
+                    terminalSortMode = terminalSortMode,
                     onToggleNotifications = onToggleNotifications,
+                    onTogglePin = onTogglePin,
+                    onSetSortMode = onSetSortMode,
+                    onTestNotification = onTestNotification,
                     onOpenSession = { sessionName ->
                         onOpenSession(sessionName)
                         scope.launch { drawerState.close() }
@@ -742,7 +756,13 @@ private fun SessionDrawerContent(
     onSwitchServer: (String) -> Unit,
     onDisconnect: () -> Unit,
     notificationTerminalIds: Set<String>,
+    unreadAttentionTerminalIds: Set<String>,
+    pinnedTerminalIds: Set<String>,
+    terminalSortMode: TerminalSortMode,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
+    onTogglePin: (terminalId: String, pinned: Boolean) -> Unit,
+    onSetSortMode: (TerminalSortMode) -> Unit,
+    onTestNotification: () -> Unit,
     onOpenSession: (String) -> Unit
 ) {
     Column(
@@ -825,19 +845,53 @@ private fun SessionDrawerContent(
             letterSpacing = 0.8.sp,
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
         )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 20.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                when (notificationTerminalIds.size) {
+                    0 -> "BACKGROUND SSH · ACTIVE"
+                    1 -> "BACKGROUND ALERTS · 1 TERMINAL"
+                    else -> "BACKGROUND ALERTS · ${notificationTerminalIds.size} TERMINALS"
+                },
+                color = if (notificationTerminalIds.isEmpty()) Success else Attention,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onTestNotification) {
+                Text("Test alert")
+            }
+        }
         Text(
-            when (notificationTerminalIds.size) {
-                0 -> "BACKGROUND SSH · ACTIVE"
-                1 -> "BACKGROUND ALERTS · 1 TERMINAL"
-                else -> "BACKGROUND ALERTS · ${notificationTerminalIds.size} TERMINALS"
-            },
-            color = if (notificationTerminalIds.isEmpty()) Success else Attention,
+            "SORT TERMINALS",
+            color = Muted,
             fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
+            fontSize = 9.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+            letterSpacing = 0.9.sp,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
         )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TerminalSortMode.entries.forEach { sortMode ->
+                FilterChip(
+                    selected = terminalSortMode == sortMode,
+                    onClick = { onSetSortMode(sortMode) },
+                    label = { Text(sortMode.label) }
+                )
+            }
+        }
         if (sessions.isEmpty() && !isRefreshing) {
             Box(
                 modifier = Modifier
@@ -860,8 +914,18 @@ private fun SessionDrawerContent(
                 }
             }
         } else {
-            val groups = sessionGroups(sessions)
+            val terminalListState = rememberLazyListState()
+            LaunchedEffect(terminalSortMode, pinnedTerminalIds) {
+                terminalListState.scrollToItem(0)
+            }
+            val groups = sessionGroups(
+                sessions = sessions,
+                pinnedTerminalIds = pinnedTerminalIds,
+                unreadAttentionTerminalIds = unreadAttentionTerminalIds,
+                sortMode = terminalSortMode
+            )
             LazyColumn(
+                state = terminalListState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 20.dp,
@@ -880,28 +944,39 @@ private fun SessionDrawerContent(
                         ) {
                             Text(
                                 group.title,
-                                color = if (group.needsAttention) Attention else {
-                                    MaterialTheme.colorScheme.onBackground
+                                color = when (group.kind) {
+                                    SessionGroupKind.ATTENTION -> Attention
+                                    SessionGroupKind.PINNED -> Sky
+                                    else -> MaterialTheme.colorScheme.onBackground
                                 },
                                 fontWeight = FontWeight.SemiBold,
                                 style = MaterialTheme.typography.titleMedium
                             )
-                            group.path?.let { path ->
-                                Text(
-                                    path,
-                                    color = Muted,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            } ?: Text(
-                                "TERMINALS WAITING FOR YOU",
-                                color = Attention,
+                            Text(
+                                group.subtitle,
+                                color = when (group.kind) {
+                                    SessionGroupKind.ATTENTION -> Attention
+                                    SessionGroupKind.PINNED -> Sky
+                                    else -> Muted
+                                },
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.7.sp
+                                fontSize = if (group.kind == SessionGroupKind.PROJECT) {
+                                    11.sp
+                                } else {
+                                    9.sp
+                                },
+                                fontWeight = if (group.kind == SessionGroupKind.PROJECT) {
+                                    FontWeight.Normal
+                                } else {
+                                    FontWeight.Bold
+                                },
+                                letterSpacing = if (group.kind == SessionGroupKind.PROJECT) {
+                                    0.sp
+                                } else {
+                                    0.7.sp
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -911,8 +986,13 @@ private fun SessionDrawerContent(
                             selected = session.terminalId == selectedSession?.terminalId,
                             notificationsEnabled =
                                 session.terminalId in notificationTerminalIds,
+                            pinned = session.terminalId in pinnedTerminalIds,
+                            showProject = group.kind != SessionGroupKind.PROJECT,
                             onToggleNotifications = {
                                 onToggleNotifications(session.terminalId, it)
+                            },
+                            onTogglePinned = {
+                                onTogglePin(session.terminalId, it)
                             },
                             onClick = { onOpenSession(session.name) }
                         )
@@ -986,7 +1066,10 @@ private fun SessionCard(
     session: PanePilotSession,
     selected: Boolean,
     notificationsEnabled: Boolean,
+    pinned: Boolean,
+    showProject: Boolean,
     onToggleNotifications: (Boolean) -> Unit,
+    onTogglePinned: (Boolean) -> Unit,
     onClick: () -> Unit
 ) {
     val stateColor = stateColor(session.state)
@@ -999,9 +1082,7 @@ private fun SessionCard(
                 MaterialTheme.colorScheme.outlineVariant
             }
         ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = !session.paneDead, onClick = onClick)
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(modifier = Modifier.height(IntrinsicSize.Min)) {
             Box(
@@ -1013,6 +1094,7 @@ private fun SessionCard(
             Column(
                 modifier = Modifier
                     .weight(1f)
+                    .clickable(enabled = !session.paneDead, onClick = onClick)
                     .padding(horizontal = 15.dp, vertical = 13.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1029,33 +1111,14 @@ private fun SessionCard(
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.Bold
                     )
-                    if (session.profile == "codex" || session.profile == "claude") {
-                        Spacer(Modifier.width(4.dp))
-                        IconButton(
-                            onClick = { onToggleNotifications(!notificationsEnabled) },
-                            enabled = !session.paneDead,
-                            modifier = Modifier.size(34.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (notificationsEnabled) {
-                                    Icons.Default.Notifications
-                                } else {
-                                    Icons.Default.NotificationsOff
-                                },
-                                contentDescription = if (notificationsEnabled) {
-                                    "Disable attention notifications for ${session.name}"
-                                } else {
-                                    "Enable attention notifications for ${session.name}"
-                                },
-                                tint = if (notificationsEnabled) Attention else Muted,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    session.typeLabel,
+                    if (showProject) {
+                        "${session.projectName} · ${session.typeLabel}"
+                    } else {
+                        session.typeLabel
+                    },
                     color = Muted,
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -1079,6 +1142,48 @@ private fun SessionCard(
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 0.8.sp
                     )
+                }
+            }
+            Row(
+                modifier = Modifier.padding(top = 8.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = { onTogglePinned(!pinned) },
+                    modifier = Modifier.size(34.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PushPin,
+                        contentDescription = if (pinned) {
+                            "Unpin ${session.name}"
+                        } else {
+                            "Pin ${session.name}"
+                        },
+                        tint = if (pinned) Sky else Muted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                if (session.profile == "codex" || session.profile == "claude") {
+                    IconButton(
+                        onClick = { onToggleNotifications(!notificationsEnabled) },
+                        enabled = !session.paneDead,
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (notificationsEnabled) {
+                                Icons.Default.Notifications
+                            } else {
+                                Icons.Default.NotificationsOff
+                            },
+                            contentDescription = if (notificationsEnabled) {
+                                "Disable attention notifications for ${session.name}"
+                            } else {
+                                "Enable attention notifications for ${session.name}"
+                            },
+                            tint = if (notificationsEnabled) Attention else Muted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
             }
         }

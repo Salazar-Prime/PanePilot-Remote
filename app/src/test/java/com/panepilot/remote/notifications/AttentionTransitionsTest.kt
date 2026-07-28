@@ -8,10 +8,11 @@ import org.junit.Test
 
 class AttentionTransitionsTest {
     @Test
-    fun reportsOnlyNewNeedsInputTransitions() {
+    fun reportsNewNeedsInputAndCompletedResponseTransitions() {
         val prior = mapOf(
             "terminal-1" to SessionState.RUNNING,
-            "terminal-2" to SessionState.NEEDS_INPUT
+            "terminal-2" to SessionState.NEEDS_INPUT,
+            "terminal-3" to SessionState.RUNNING
         )
         val current = listOf(
             session("terminal-1", SessionState.NEEDS_INPUT),
@@ -20,29 +21,50 @@ class AttentionTransitionsTest {
         )
 
         assertEquals(
-            listOf("terminal-1"),
-            newlyAttentionRequired(prior, current).map { it.terminalId }
+            listOf(
+                "terminal-1" to AttentionEventType.NEEDS_INPUT,
+                "terminal-3" to AttentionEventType.RESPONSE_READY
+            ),
+            newAttentionEvents(prior, current).map { it.session.terminalId to it.type }
         )
     }
 
     @Test
     fun newlyDiscoveredAttentionSessionIsReported() {
-        val transitions = newlyAttentionRequired(
+        val transitions = newAttentionEvents(
             previousStates = emptyMap(),
             sessions = listOf(session("terminal-1", SessionState.NEEDS_INPUT))
         )
 
-        assertEquals("terminal-1", transitions.single().terminalId)
+        assertEquals("terminal-1", transitions.single().session.terminalId)
+        assertEquals(AttentionEventType.NEEDS_INPUT, transitions.single().type)
     }
 
     @Test
-    fun nonAttentionStatesAreIgnored() {
-        val transitions = newlyAttentionRequired(
-            previousStates = mapOf("terminal-1" to SessionState.RUNNING),
+    fun readyWithoutAWorkingTransitionDoesNotAlertOnStartup() {
+        val transitions = newAttentionEvents(
+            previousStates = emptyMap(),
             sessions = listOf(session("terminal-1", SessionState.READY))
         )
 
         assertTrue(transitions.isEmpty())
+    }
+
+    @Test
+    fun runningAndIdleSessionsResolveUnreadAttention() {
+        val resolved = noLongerNeedsAttention(
+            listOf(
+                session("terminal-1", SessionState.RUNNING),
+                session("terminal-2", SessionState.IDLE),
+                session("terminal-3", SessionState.READY),
+                session("terminal-4", SessionState.NEEDS_INPUT)
+            )
+        )
+
+        assertEquals(
+            listOf("terminal-1", "terminal-2"),
+            resolved.map { it.terminalId }
+        )
     }
 
     private fun session(id: String, state: SessionState) = PanePilotSession(

@@ -13,14 +13,17 @@ import android.os.IBinder
 import com.panepilot.remote.MainActivity
 import com.panepilot.remote.R
 import com.panepilot.remote.data.AttentionPreferenceStore
+import com.panepilot.remote.data.AttentionStateStore
 import com.panepilot.remote.data.BackgroundMonitorStore
 import com.panepilot.remote.data.CredentialStore
 import com.panepilot.remote.data.ProfileStore
+import com.panepilot.remote.data.SessionStateStore
 import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.notifications.AttentionNotifier
-import com.panepilot.remote.notifications.newlyAttentionRequired
+import com.panepilot.remote.notifications.newAttentionEvents
+import com.panepilot.remote.notifications.noLongerNeedsAttention
 import com.panepilot.remote.ssh.SshConnection
 import com.panepilot.remote.ssh.TmuxGateway
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +61,8 @@ class AgentMonitorService : Service() {
     private lateinit var profiles: ProfileStore
     private lateinit var credentials: CredentialStore
     private lateinit var attentionPreferences: AttentionPreferenceStore
+    private lateinit var attentionState: AttentionStateStore
+    private lateinit var sessionStates: SessionStateStore
     private lateinit var monitorStore: BackgroundMonitorStore
     private lateinit var attentionNotifier: AttentionNotifier
     private lateinit var notificationManager: NotificationManager
@@ -68,6 +73,8 @@ class AgentMonitorService : Service() {
         profiles = ProfileStore(this)
         credentials = CredentialStore(this)
         attentionPreferences = AttentionPreferenceStore(this)
+        attentionState = AttentionStateStore(this)
+        sessionStates = SessionStateStore(this)
         monitorStore = BackgroundMonitorStore(this)
         attentionNotifier = AttentionNotifier(this)
         notificationManager = getSystemService(NotificationManager::class.java)
@@ -86,6 +93,8 @@ class AgentMonitorService : Service() {
                     val terminalIds = attentionPreferences.enabledTerminalIds(profileId)
                     attentionNotifier.cancelProfile(profileId, terminalIds)
                     attentionPreferences.removeProfile(profileId)
+                    attentionState.removeProfile(profileId)
+                    sessionStates.removeProfile(profileId)
                 }
                 stopAll(clearConfiguration = true)
                 return START_NOT_STICKY
@@ -158,7 +167,7 @@ class AgentMonitorService : Service() {
 
     private suspend fun monitorProfile(monitor: ProfileMonitor) {
         val profileId = monitor.profileId
-        var previousStates: Map<String, SessionState> = emptyMap()
+        var previousStates: Map<String, SessionState> = sessionStates.load(profileId)
         var failedAttempts = 0
 
         while (
@@ -201,21 +210,22 @@ class AgentMonitorService : Service() {
                     updateAggregateForeground()
                     monitor.ssh.connect(profile, secret)
                     monitor.tmux.reset()
-                    previousStates = emptyMap()
                 }
 
                 val sessions = monitor.tmux.listSessions()
                 val currentStates = sessions.associate { it.terminalId to it.state }
-                newlyAttentionRequired(previousStates, sessions)
-                    .filter { it.terminalId in enabledIds }
-                    .forEach { attentionNotifier.show(profile, it) }
-                sessions
-                    .filter {
-                        previousStates[it.terminalId] == SessionState.NEEDS_INPUT &&
-                            it.state != SessionState.NEEDS_INPUT
+                newAttentionEvents(previousStates, sessions)
+                    .filter { it.session.terminalId in enabledIds }
+                    .forEach { event ->
+                        attentionState.markUnread(profileId, event.session.terminalId)
+                        attentionNotifier.show(profile, event)
                     }
-                    .forEach { attentionNotifier.cancel(profileId, it.terminalId) }
+                noLongerNeedsAttention(sessions).forEach { session ->
+                    attentionState.markRead(profileId, session.terminalId)
+                    attentionNotifier.cancel(profileId, session.terminalId)
+                }
                 previousStates = currentStates
+                sessionStates.save(profileId, currentStates)
                 failedAttempts = 0
                 statuses[profileId] = MonitorStatus(
                     profileName = profile.name,
@@ -228,7 +238,6 @@ class AgentMonitorService : Service() {
             } catch (_: Exception) {
                 monitor.ssh.disconnect()
                 monitor.tmux.reset()
-                previousStates = emptyMap()
                 failedAttempts += 1
                 statuses[profileId] = MonitorStatus(
                     profileName = profile.name,

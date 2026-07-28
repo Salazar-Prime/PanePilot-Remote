@@ -5,9 +5,12 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.panepilot.remote.data.AttentionPreferenceStore
+import com.panepilot.remote.data.AttentionStateStore
 import com.panepilot.remote.data.BackgroundMonitorStore
 import com.panepilot.remote.data.CredentialStore
 import com.panepilot.remote.data.ProfileStore
+import com.panepilot.remote.data.SessionStateStore
+import com.panepilot.remote.data.TerminalPreferenceStore
 import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
@@ -16,9 +19,13 @@ import com.panepilot.remote.model.RemoteFileEntry
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
+import com.panepilot.remote.model.TerminalSortMode
 import com.panepilot.remote.monitoring.AgentMonitorService
+import com.panepilot.remote.notifications.AttentionEvent
+import com.panepilot.remote.notifications.AttentionEventType
 import com.panepilot.remote.notifications.AttentionNotifier
-import com.panepilot.remote.notifications.newlyAttentionRequired
+import com.panepilot.remote.notifications.newAttentionEvents
+import com.panepilot.remote.notifications.noLongerNeedsAttention
 import com.panepilot.remote.ssh.RemoteFileGateway
 import com.panepilot.remote.ssh.SshConnection
 import com.panepilot.remote.ssh.TmuxGateway
@@ -63,6 +70,9 @@ data class AppUiState(
     val isBusy: Boolean = false,
     val isSending: Boolean = false,
     val attentionNotificationTerminalIds: Set<String> = emptySet(),
+    val unreadAttentionTerminalIds: Set<String> = emptySet(),
+    val pinnedTerminalIds: Set<String> = emptySet(),
+    val terminalSortMode: TerminalSortMode = TerminalSortMode.ACTIVITY,
     val remoteFileRoot: String = "",
     val remoteFilePath: String = "",
     val remoteFiles: List<RemoteFileEntry> = emptyList(),
@@ -96,7 +106,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = ProfileStore(application)
     private val credentialStore = CredentialStore(application)
     private val attentionPreferences = AttentionPreferenceStore(application)
+    private val attentionState = AttentionStateStore(application)
     private val backgroundMonitorStore = BackgroundMonitorStore(application)
+    private val sessionStateStore = SessionStateStore(application)
+    private val terminalPreferences = TerminalPreferenceStore(application)
     private val attentionNotifier = AttentionNotifier(application)
     private val pendingTrust = AtomicReference<PendingTrust?>(null)
     private val connections = linkedMapOf<String, LiveConnection>()
@@ -117,6 +130,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var fileLoading: Job? = null
     private var consoleFailureReported = false
     private var lastSessionStates: Map<String, SessionState> = emptyMap()
+    private var pendingAttentionTarget: Pair<String, String>? = null
 
     init {
         restoreBackgroundConnection()
@@ -229,6 +243,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val notificationIds = attentionPreferences.enabledTerminalIds(profileId)
             attentionNotifier.cancelProfile(profileId, notificationIds)
             attentionPreferences.removeProfile(profileId)
+            attentionState.removeProfile(profileId)
+            sessionStateStore.removeProfile(profileId)
+            terminalPreferences.removeProfile(profileId)
             _state.update {
                 it.copy(profiles = profiles, screen = AppScreen.Servers, error = null)
             }
@@ -257,7 +274,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun connect(
         profileId: String,
         secret: ConnectionSecret,
-        rememberPassword: Boolean = false
+        rememberPassword: Boolean = false,
+        activateOnlyIfNone: Boolean = false
     ) {
         val profile = profile(profileId) ?: return
         viewModelScope.launch {
@@ -300,7 +318,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 connections[profile.id] = connection
                 AgentMonitorService.start(getApplication(), profile.id, secret)
-                activateConnection(connection)
+                if (!activateOnlyIfNone || activeProfileId == null) {
+                    activateConnection(connection)
+                } else {
+                    _state.update {
+                        it.copy(
+                            connectedProfileIds = connectedProfileIds(),
+                            isBusy = false
+                        )
+                    }
+                }
             }.onFailure { error ->
                 finishWithError(error)
             }
@@ -330,6 +357,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 isBusy = false,
                 isSending = false,
                 attentionNotificationTerminalIds = emptySet(),
+                unreadAttentionTerminalIds = emptySet(),
+                pinnedTerminalIds = emptySet(),
+                terminalSortMode = TerminalSortMode.ACTIVITY,
                 remoteFileRoot = "",
                 remoteFilePath = "",
                 remoteFiles = emptyList(),
@@ -362,6 +392,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openConsole(sessionName: String) {
         val selected = _state.value.sessions.firstOrNull { it.name == sessionName } ?: return
+        markTerminalRead(selected.terminalId)
         _state.update {
             it.copy(
                 selectedSession = selected,
@@ -373,6 +404,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         startConsolePolling(sessionName)
+    }
+
+    fun openAttentionTarget(profileId: String, terminalId: String) {
+        pendingAttentionTarget = profileId to terminalId
+        openServer(profileId)
     }
 
     fun openFiles() {
@@ -516,9 +552,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val updated = attentionPreferences.setEnabled(profile.id, terminalId, enabled)
         _state.update { it.copy(attentionNotificationTerminalIds = updated) }
         if (enabled && session.state == SessionState.NEEDS_INPUT) {
-            attentionNotifier.show(profile, session)
+            val unread = attentionState.markUnread(profile.id, terminalId)
+            _state.update { it.copy(unreadAttentionTerminalIds = unread) }
+            attentionNotifier.show(
+                profile,
+                AttentionEvent(session, AttentionEventType.NEEDS_INPUT)
+            )
         } else if (!enabled) {
+            attentionState.markRead(profile.id, terminalId)
             attentionNotifier.cancel(profile.id, terminalId)
+            _state.update {
+                it.copy(
+                    unreadAttentionTerminalIds =
+                        attentionState.unreadTerminalIds(profile.id)
+                )
+            }
         }
         val secret = activeConnection?.secret ?: when (profile.authMode) {
             AuthMode.PASSWORD -> credentialStore.password(profile.id)?.let {
@@ -532,6 +580,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             showError(
                 "Reconnect with Remember on this phone to keep alerts running in the background."
+            )
+        }
+    }
+
+    fun setTerminalPinned(terminalId: String, pinned: Boolean) {
+        val profileId = _state.value.connectedProfile?.id ?: return
+        val updated = terminalPreferences.setPinned(profileId, terminalId, pinned)
+        _state.update { it.copy(pinnedTerminalIds = updated) }
+    }
+
+    fun setTerminalSortMode(sortMode: TerminalSortMode) {
+        val profileId = _state.value.connectedProfile?.id ?: return
+        terminalPreferences.setSortMode(profileId, sortMode)
+        _state.update { it.copy(terminalSortMode = sortMode) }
+    }
+
+    fun testAttentionNotification() {
+        val profile = _state.value.connectedProfile ?: return
+        if (attentionNotifier.showTest(profile)) {
+            _state.update { it.copy(notice = "Test alert sent.") }
+        } else {
+            showError(
+                "Agent alerts are disabled in Android notification settings for PanePilot."
             )
         }
     }
@@ -676,7 +747,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val profileId = backgroundMonitorStore.lastActiveProfileId() ?: return
         val profile = profile(profileId) ?: return
         AgentMonitorService.connectedSshFor(profileId)?.let { warmSsh ->
-            attachToWarmConnection(profile, warmSsh)
+            attachToWarmConnection(profile, warmSsh, activateOnlyIfNone = true)
             return
         }
         val secret = AgentMonitorService.connectionSecretFor(profileId) ?: when (profile.authMode) {
@@ -691,7 +762,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             secret = secret,
             rememberPassword =
                 profile.authMode == AuthMode.PASSWORD &&
-                    credentialStore.password(profileId) != null
+                    credentialStore.password(profileId) != null,
+            activateOnlyIfNone = true
         )
     }
 
@@ -716,6 +788,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 isSending = false,
                 attentionNotificationTerminalIds =
                     attentionPreferences.enabledTerminalIds(connection.profile.id),
+                unreadAttentionTerminalIds =
+                    attentionState.unreadTerminalIds(connection.profile.id),
+                pinnedTerminalIds =
+                    terminalPreferences.pinnedTerminalIds(connection.profile.id),
+                terminalSortMode =
+                    terminalPreferences.sortMode(connection.profile.id),
                 remoteFileRoot = "",
                 remoteFilePath = "",
                 remoteFiles = emptyList(),
@@ -730,9 +808,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         startSessionPolling()
+        completePendingAttentionTarget(connection)
     }
 
-    private fun attachToWarmConnection(profile: ServerProfile, warmSsh: SshConnection) {
+    private fun attachToWarmConnection(
+        profile: ServerProfile,
+        warmSsh: SshConnection,
+        activateOnlyIfNone: Boolean = false
+    ) {
         viewModelScope.launch {
             _state.update { it.copy(isBusy = true, error = null) }
             runCatching {
@@ -754,7 +837,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     if (prior.ownsTransport) prior.ssh.disconnect()
                 }
                 connections[profile.id] = connection
-                activateConnection(connection)
+                if (!activateOnlyIfNone || activeProfileId == null) {
+                    activateConnection(connection)
+                } else {
+                    _state.update {
+                        it.copy(
+                            connectedProfileIds = connectedProfileIds(),
+                            isBusy = false
+                        )
+                    }
+                }
             }.onFailure(::finishWithError)
         }
     }
@@ -784,7 +876,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     transcript = "",
                     paneTitle = "",
                     composer = "",
-                    attentionNotificationTerminalIds = emptySet()
+                    attentionNotificationTerminalIds = emptySet(),
+                    unreadAttentionTerminalIds = emptySet(),
+                    pinnedTerminalIds = emptySet(),
+                    terminalSortMode = TerminalSortMode.ACTIVITY
                 )
             }
         }
@@ -794,6 +889,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun connectedProfileIds(): Set<String> =
         backgroundMonitorStore.monitoredProfileIds() +
             connections.values.filter { it.ssh.isConnected }.map { it.profile.id }
+
+    private fun completePendingAttentionTarget(connection: LiveConnection) {
+        val target = pendingAttentionTarget ?: return
+        if (target.first != connection.profile.id) return
+        val session = connection.sessions.firstOrNull { it.terminalId == target.second }
+        pendingAttentionTarget = null
+        if (session == null) {
+            showError("That tmux session is no longer available.")
+        } else {
+            openConsole(session.name)
+        }
+    }
+
+    private fun markTerminalRead(terminalId: String) {
+        val profileId = _state.value.connectedProfile?.id ?: return
+        val unread = attentionState.markRead(profileId, terminalId)
+        attentionNotifier.cancel(profileId, terminalId)
+        _state.update { it.copy(unreadAttentionTerminalIds = unread) }
+    }
 
     private fun loadRemoteDirectory(relativePath: String) {
         val connection = activeConnection ?: return
@@ -872,15 +986,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val profile = current.connectedProfile
         if (detectTransitions && profile != null) {
             val enabledIds = attentionPreferences.enabledTerminalIds(profile.id)
-            newlyAttentionRequired(lastSessionStates, sessions)
-                .filter { it.terminalId in enabledIds }
-                .forEach { attentionNotifier.show(profile, it) }
-            sessions
-                .filter {
-                    lastSessionStates[it.terminalId] == SessionState.NEEDS_INPUT &&
-                        it.state != SessionState.NEEDS_INPUT
+            newAttentionEvents(lastSessionStates, sessions)
+                .filter { it.session.terminalId in enabledIds }
+                .forEach { event ->
+                    attentionState.markUnread(profile.id, event.session.terminalId)
+                    attentionNotifier.show(profile, event)
                 }
-                .forEach { attentionNotifier.cancel(profile.id, it.terminalId) }
+            noLongerNeedsAttention(sessions).forEach { session ->
+                attentionState.markRead(profile.id, session.terminalId)
+                attentionNotifier.cancel(profile.id, session.terminalId)
+            }
         }
         lastSessionStates = sessions.associate { it.terminalId to it.state }
         activeConnection?.sessions = sessions
@@ -895,7 +1010,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 paneTitle = selected?.paneTitle ?: state.paneTitle,
                 attentionNotificationTerminalIds = profile?.let {
                     attentionPreferences.enabledTerminalIds(it.id)
-                }.orEmpty()
+                }.orEmpty(),
+                unreadAttentionTerminalIds = profile?.let {
+                    attentionState.unreadTerminalIds(it.id)
+                }.orEmpty(),
+                pinnedTerminalIds = profile?.let {
+                    terminalPreferences.pinnedTerminalIds(it.id)
+                }.orEmpty(),
+                terminalSortMode = profile?.let {
+                    terminalPreferences.sortMode(it.id)
+                } ?: TerminalSortMode.ACTIVITY
             )
         }
     }

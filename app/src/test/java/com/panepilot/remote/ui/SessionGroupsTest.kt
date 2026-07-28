@@ -2,53 +2,80 @@ package com.panepilot.remote.ui
 
 import com.panepilot.remote.model.PanePilotSession
 import com.panepilot.remote.model.SessionState
+import com.panepilot.remote.model.TerminalSortMode
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SessionGroupsTest {
     @Test
-    fun attentionSessionsFormTheFirstGroupAcrossProjects() {
+    fun unreadAttentionStaysAheadOfPinnedAndSortedSessions() {
         val sessions = listOf(
-            session("idle-a", "/work/a", SessionState.IDLE),
-            session("attention-b", "/work/b", SessionState.NEEDS_INPUT),
-            session("attention-a", "/work/a", SessionState.NEEDS_INPUT),
-            session("running-b", "/work/b", SessionState.RUNNING)
+            session("Zulu", "/work/a", SessionState.IDLE),
+            session("Ready response", "/work/b", SessionState.READY),
+            session("Pinned terminal", "/work/a", SessionState.RUNNING),
+            session("Direct question", "/work/c", SessionState.NEEDS_INPUT)
         )
 
-        val groups = sessionGroups(sessions)
+        val groups = sessionGroups(
+            sessions = sessions,
+            pinnedTerminalIds = setOf("terminal-Pinned terminal"),
+            unreadAttentionTerminalIds = setOf("terminal-Ready response"),
+            sortMode = TerminalSortMode.NAME
+        )
 
-        assertEquals("attention", groups.first().key)
-        assertTrue(groups.first().needsAttention)
         assertEquals(
-            listOf("attention-b", "attention-a"),
-            groups.first().sessions.map { it.name }
+            listOf(
+                SessionGroupKind.ATTENTION,
+                SessionGroupKind.PINNED,
+                SessionGroupKind.TERMINALS
+            ),
+            groups.map { it.kind }
         )
-        assertEquals(listOf("/work/a", "/work/b"), groups.drop(1).map { it.path })
-        assertTrue(groups.drop(1).all { group -> group.sessions.none {
-            it.state == SessionState.NEEDS_INPUT
-        } })
+        assertEquals(
+            listOf("Direct question", "Ready response"),
+            groups[0].sessions.map { it.name }
+        )
+        assertEquals(listOf("Pinned terminal"), groups[1].sessions.map { it.name })
+        assertEquals(listOf("Zulu"), groups[2].sessions.map { it.name })
     }
 
     @Test
-    fun projectsRemainGroupedWhenNothingNeedsAttention() {
+    fun projectSortKeepsRemainingSessionsInAlphabeticalProjectGroups() {
         val groups = sessionGroups(
-            listOf(
-                session("one", "/work/a", SessionState.READY),
-                session("two", "/work/a", SessionState.IDLE)
-            )
+            sessions = listOf(
+                session("Zulu", "/work/beta", SessionState.IDLE),
+                session("Alpha", "/work/alpha", SessionState.READY),
+                session("Beta", "/work/alpha", SessionState.RUNNING)
+            ),
+            pinnedTerminalIds = emptySet(),
+            unreadAttentionTerminalIds = emptySet(),
+            sortMode = TerminalSortMode.PROJECT
         )
 
-        assertEquals(1, groups.size)
-        assertFalse(groups.single().needsAttention)
-        assertEquals(listOf("one", "two"), groups.single().sessions.map { it.name })
+        assertEquals(listOf("alpha", "beta"), groups.map { it.title })
+        assertEquals(listOf("Alpha", "Beta"), groups.first().sessions.map { it.name })
+    }
+
+    @Test
+    fun newestSortUsesDescendingCreationTimestamp() {
+        val groups = sessionGroups(
+            sessions = listOf(
+                session("Old", "/work/a", SessionState.IDLE, "2026-01-01T00:00:00Z"),
+                session("New", "/work/a", SessionState.IDLE, "2026-07-28T00:00:00Z")
+            ),
+            pinnedTerminalIds = emptySet(),
+            unreadAttentionTerminalIds = emptySet(),
+            sortMode = TerminalSortMode.NEWEST
+        )
+
+        assertEquals(listOf("New", "Old"), groups.single().sessions.map { it.name })
     }
 
     private fun session(
         name: String,
         projectPath: String,
-        state: SessionState
+        state: SessionState,
+        createdAt: String = "2026-07-01T00:00:00Z"
     ) = PanePilotSession(
         name = name,
         attachedClients = 0,
@@ -59,7 +86,7 @@ class SessionGroupsTest {
         projectId = "project-$projectPath",
         projectPath = projectPath,
         profile = "codex",
-        createdAt = "",
+        createdAt = createdAt,
         dangerousMode = false,
         sessionKind = "terminal",
         actionName = null,

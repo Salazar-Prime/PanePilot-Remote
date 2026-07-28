@@ -36,10 +36,15 @@ import com.panepilot.remote.ui.ServerEditorScreen
 import com.panepilot.remote.ui.ServerListScreen
 import com.panepilot.remote.ui.SessionWorkspaceScreen
 import com.panepilot.remote.ui.Ink
+import com.panepilot.remote.notifications.AttentionNotifier
+import kotlinx.coroutines.flow.MutableStateFlow
 
 class MainActivity : ComponentActivity() {
+    private val attentionTarget = MutableStateFlow<Pair<String, String>?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        attentionTarget.value = intent.attentionTarget()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(0x00000000),
             navigationBarStyle = SystemBarStyle.dark(0x00000000)
@@ -48,6 +53,8 @@ class MainActivity : ComponentActivity() {
             PanePilotTheme {
                 val appViewModel: AppViewModel = viewModel()
                 val state by appViewModel.state.collectAsStateWithLifecycle()
+                val requestedAttentionTarget by
+                    attentionTarget.collectAsStateWithLifecycle()
                 val snackbar = remember { SnackbarHostState() }
                 var pendingNotificationTerminalId by remember {
                     mutableStateOf<String?>(null)
@@ -74,6 +81,13 @@ class MainActivity : ComponentActivity() {
                     state.error?.let {
                         snackbar.showSnackbar(it)
                         appViewModel.clearError()
+                    }
+                }
+
+                LaunchedEffect(requestedAttentionTarget) {
+                    requestedAttentionTarget?.let { (profileId, terminalId) ->
+                        appViewModel.openAttentionTarget(profileId, terminalId)
+                        attentionTarget.value = null
                     }
                 }
 
@@ -193,6 +207,10 @@ class MainActivity : ComponentActivity() {
                                 onTerminalKey = appViewModel::sendTerminalKey,
                                 notificationTerminalIds =
                                     state.attentionNotificationTerminalIds,
+                                unreadAttentionTerminalIds =
+                                    state.unreadAttentionTerminalIds,
+                                pinnedTerminalIds = state.pinnedTerminalIds,
+                                terminalSortMode = state.terminalSortMode,
                                 onToggleNotifications = { terminalId, enabled ->
                                     if (!enabled) {
                                         appViewModel.setAttentionNotificationsEnabled(
@@ -215,6 +233,9 @@ class MainActivity : ComponentActivity() {
                                         )
                                     }
                                 },
+                                onTogglePin = appViewModel::setTerminalPinned,
+                                onSetSortMode = appViewModel::setTerminalSortMode,
+                                onTestNotification = appViewModel::testAttentionNotification,
                                 onBrowseFiles = appViewModel::openFiles,
                                 onOpenUrl = { value ->
                                     val uri = Uri.parse(value)
@@ -261,5 +282,18 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        attentionTarget.value = intent.attentionTarget()
+    }
+
+    private fun Intent.attentionTarget(): Pair<String, String>? {
+        val profileId = getStringExtra(AttentionNotifier.EXTRA_PROFILE_ID)
+        val terminalId = getStringExtra(AttentionNotifier.EXTRA_TERMINAL_ID)
+        return if (profileId.isNullOrBlank() || terminalId.isNullOrBlank()) null
+        else profileId to terminalId
     }
 }

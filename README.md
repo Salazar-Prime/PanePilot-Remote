@@ -15,15 +15,17 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Password or imported private-key authentication
 - Optional password storage encrypted with Android Keystore
 - SSH host-key verification and saved `known_hosts`
-- PanePilot session discovery grouped by project folder
+- PanePilot session discovery with activity, name, newest, and project sorting
+- Persisted per-server terminal pinning for quick access
 - A hideable side pane for switching between projects and sessions
 - Codex progress state from the tmux pane title
 - Bounded, auto-refreshing pane snapshots with ANSI terminal colors
 - Multiline agent messages sent through a temporary tmux buffer
 - A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
 - Project-scoped remote file browsing with downloads through Android's system file picker
-- Per-terminal alerts when a Codex or Claude session transitions to needing input
-- A dedicated attention queue that keeps waiting terminals above project groups
+- Per-terminal alerts when a Codex or Claude session needs input or finishes a response
+- A dedicated unread attention queue that stays above pinned and sorted terminals
+- Exact-session notification links and an in-app test-alert action
 - Foreground SSH/tmux monitoring that continues after leaving or swiping away the app
 - Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
@@ -108,13 +110,17 @@ and allow installation from that file source when Android asks.
    a switcher at the top of the session side pane, and tapping one changes servers
    without disconnecting the others.
 8. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
-   input moves into the **Needs attention** section at the top of the list. The
+   input or finishes a response moves into the **Needs attention** section at the top
+   of the list until you open it. Use **Test alert** to verify Android delivery. The
    persistent monitor keeps every connected server online and stops an individual
    connection only when you explicitly disconnect it. On Android 13 and newer,
    approve the notification permission the first time.
 9. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
    open its folder in Remote Files; file paths are highlighted and remain one tap away
    from downloading.
+10. Pin frequently used terminals with the pin button. Choose **Activity**, **Name**,
+    **Newest**, or **Project** above the terminal list; the choice and pins are saved
+    separately for each server.
 
 If a legitimate server is rebuilt and its host key changes, edit that server and use
 **Forget saved host key** only after independently verifying the new fingerprint.
@@ -144,6 +150,8 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
   can survive a process restart because they are encrypted with Android Keystore.
   Unremembered passwords and private-key passphrases remain only in service memory and
   require reopening PanePilot if Android kills the service process.
+- Last-seen agent states are saved locally, so a brief SSH reconnect does not lose the
+  `Working` to `Ready` transition used for response-complete alerts.
 - Android force-stop always disables foreground monitoring until PanePilot is opened
   and connected again. Monitoring does not start automatically after a phone reboot.
 - Leaving the app does not stop the remote tmux session.

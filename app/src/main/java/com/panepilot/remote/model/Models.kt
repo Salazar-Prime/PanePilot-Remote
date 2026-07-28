@@ -44,6 +44,13 @@ enum class SessionState {
     STOPPED
 }
 
+enum class TerminalSortMode(val label: String) {
+    ACTIVITY("Activity"),
+    NAME("Name"),
+    NEWEST("Newest"),
+    PROJECT("Project")
+}
+
 enum class TerminalKey(val label: String) {
     ENTER("Enter"),
     ESCAPE("Esc"),
