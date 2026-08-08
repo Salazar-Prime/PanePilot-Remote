@@ -32,7 +32,14 @@ class ProfileStore(private val context: Context) {
                             username = item.getString("username"),
                             authMode = AuthMode.valueOf(item.getString("authMode")),
                             keyDisplayName = item.optString("keyDisplayName")
-                                .takeIf { it.isNotBlank() }
+                                .takeIf { it.isNotBlank() },
+                            icon = item.optString("icon").takeIf {
+                                it.isNotBlank() &&
+                                    it.toByteArray().size <= 32 &&
+                                    it.none { character ->
+                                        character.code < 32 || character.code == 127
+                                    }
+                            }
                         )
                     )
                 }
@@ -119,6 +126,7 @@ class ProfileStore(private val context: Context) {
                     .put("username", profile.username)
                     .put("authMode", profile.authMode.name)
                     .put("keyDisplayName", profile.keyDisplayName ?: "")
+                    .put("icon", profile.icon ?: "")
             )
         }
         preferences.edit().putString(PROFILES_KEY, array.toString()).apply()

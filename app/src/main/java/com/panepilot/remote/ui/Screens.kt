@@ -1,6 +1,7 @@
 package com.panepilot.remote.ui
 
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -8,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,16 +45,20 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsOff
 import androidx.compose.material.icons.filled.PowerSettingsNew
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
@@ -60,6 +66,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilledIconButton
@@ -90,6 +98,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextStyle
@@ -102,7 +112,10 @@ import com.panepilot.remote.HostKeyPrompt
 import com.panepilot.remote.model.AuthMode
 import com.panepilot.remote.model.ConnectionSecret
 import com.panepilot.remote.model.PanePilotSession
+import com.panepilot.remote.model.ProjectAction
 import com.panepilot.remote.model.RemoteFileEntry
+import com.panepilot.remote.model.RemoteFilePreview
+import com.panepilot.remote.model.RemoteFilePreviewKind
 import com.panepilot.remote.model.ServerProfile
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
@@ -116,6 +129,8 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+
+private val SERVER_ICONS = listOf("⚒️", "🖥️", "🧱", "🧭", "☁️", "🔬", "🏠", "🚀")
 
 @Composable
 fun ServerListScreen(
@@ -246,8 +261,9 @@ private fun ServerCard(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    profile.name.take(1).uppercase(),
+                    profile.icon ?: profile.name.take(1).uppercase(),
                     color = Sky,
+                    fontSize = if (profile.icon == null) 16.sp else 21.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -318,6 +334,7 @@ fun ServerEditorScreen(
     var authMode by rememberSaveable(profile?.id) {
         mutableStateOf(profile?.authMode ?: AuthMode.PRIVATE_KEY)
     }
+    var serverIcon by rememberSaveable(profile?.id) { mutableStateOf(profile?.icon.orEmpty()) }
     var selectedKey by remember { mutableStateOf<Uri?>(null) }
     var selectedKeyName by rememberSaveable(profile?.id) {
         mutableStateOf(profile?.keyDisplayName.orEmpty())
@@ -359,6 +376,36 @@ fun ServerEditorScreen(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Text(
+                "Server icon",
+                color = Muted,
+                style = MaterialTheme.typography.labelLarge
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SERVER_ICONS.forEach { candidate ->
+                    val selected = serverIcon == candidate
+                    Surface(
+                        color = if (selected) SlateRaised else Slate,
+                        border = BorderStroke(
+                            1.dp,
+                            if (selected) Sky else MaterialTheme.colorScheme.outlineVariant
+                        ),
+                        shape = RoundedCornerShape(11.dp),
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clickable { serverIcon = candidate }
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(candidate, fontSize = 21.sp)
+                        }
+                    }
+                }
+            }
             OutlinedTextField(
                 value = host,
                 onValueChange = { host = it },
@@ -442,7 +489,8 @@ fun ServerEditorScreen(
                             port = port.toIntOrNull() ?: 0,
                             username = username,
                             authMode = authMode,
-                            keyDisplayName = selectedKeyName.takeIf { it.isNotBlank() }
+                            keyDisplayName = selectedKeyName.takeIf { it.isNotBlank() },
+                            icon = serverIcon.takeIf { it.isNotBlank() }
                         ),
                         selectedKey
                     )
@@ -649,8 +697,7 @@ fun CredentialsScreen(
 @Composable
 fun SessionWorkspaceScreen(
     profile: ServerProfile?,
-    profiles: List<ServerProfile>,
-    connectedProfileIds: Set<String>,
+    connectionOnline: Boolean,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     transcript: String,
@@ -660,7 +707,6 @@ fun SessionWorkspaceScreen(
     isSending: Boolean,
     onRefresh: () -> Unit,
     onShowServers: () -> Unit,
-    onSwitchServer: (String) -> Unit,
     onDisconnect: () -> Unit,
     onOpenSession: (String) -> Unit,
     onComposerChange: (String) -> Unit,
@@ -669,6 +715,8 @@ fun SessionWorkspaceScreen(
     notificationTerminalIds: Set<String>,
     unreadAttentionTerminalIds: Set<String>,
     pinnedTerminalIds: Set<String>,
+    terminalInteractionTimes: Map<String, Long>,
+    terminalActivityTimes: Map<String, Long>,
     terminalSortMode: TerminalSortMode,
     notificationHistory: List<NotificationHistoryEntry>,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
@@ -677,6 +725,7 @@ fun SessionWorkspaceScreen(
     onRefreshNotificationHistory: () -> Unit,
     onOpenNotificationHistoryEntry: (profileId: String, terminalId: String) -> Unit,
     onBrowseFiles: () -> Unit,
+    onRunActions: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onOpenPath: (String) -> Unit
 ) {
@@ -702,20 +751,19 @@ fun SessionWorkspaceScreen(
             ) {
                 SessionDrawerContent(
                     profile = profile,
-                    profiles = profiles,
-                    connectedProfileIds = connectedProfileIds,
+                    connectionOnline = connectionOnline,
                     sessions = sessions,
                     selectedSession = selectedSession,
                     isRefreshing = isRefreshing,
                     onRefresh = onRefresh,
                     onShowServers = onShowServers,
-                    onSwitchServer = onSwitchServer,
                     onDisconnect = onDisconnect,
                     notificationTerminalIds = notificationTerminalIds,
                     unreadAttentionTerminalIds = unreadAttentionTerminalIds,
                     pinnedTerminalIds = pinnedTerminalIds,
+                    terminalInteractionTimes = terminalInteractionTimes,
+                    terminalActivityTimes = terminalActivityTimes,
                     terminalSortMode = terminalSortMode,
-                    notificationHistoryCount = notificationHistory.size,
                     onToggleNotifications = onToggleNotifications,
                     onTogglePin = onTogglePin,
                     onSetSortMode = onSetSortMode,
@@ -745,6 +793,7 @@ fun SessionWorkspaceScreen(
                 isSending = isSending,
                 onShowSessions = { scope.launch { drawerState.open() } },
                 onBrowseFiles = onBrowseFiles,
+                onRunActions = onRunActions,
                 onComposerChange = onComposerChange,
                 onSend = onSend,
                 onTerminalKey = onTerminalKey,
@@ -770,26 +819,26 @@ fun SessionWorkspaceScreen(
 @Composable
 private fun SessionDrawerContent(
     profile: ServerProfile?,
-    profiles: List<ServerProfile>,
-    connectedProfileIds: Set<String>,
+    connectionOnline: Boolean,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
     onShowServers: () -> Unit,
-    onSwitchServer: (String) -> Unit,
     onDisconnect: () -> Unit,
     notificationTerminalIds: Set<String>,
     unreadAttentionTerminalIds: Set<String>,
     pinnedTerminalIds: Set<String>,
+    terminalInteractionTimes: Map<String, Long>,
+    terminalActivityTimes: Map<String, Long>,
     terminalSortMode: TerminalSortMode,
-    notificationHistoryCount: Int,
     onToggleNotifications: (terminalId: String, enabled: Boolean) -> Unit,
     onTogglePin: (terminalId: String, pinned: Boolean) -> Unit,
     onSetSortMode: (TerminalSortMode) -> Unit,
     onShowNotificationHistory: () -> Unit,
     onOpenSession: (String) -> Unit
 ) {
+    var showSortMenu by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -797,10 +846,61 @@ private fun SessionDrawerContent(
             .navigationBarsPadding()
     ) {
         ScreenHeader(
-            eyebrow = "SSH / ${profile?.name?.uppercase().orEmpty()}",
+            eyebrow = if (connectionOnline) {
+                "${profile?.icon.orEmpty()} SSH / ${profile?.name?.uppercase().orEmpty()}".trim()
+            } else {
+                "${profile?.icon.orEmpty()} SSH / ${profile?.name?.uppercase().orEmpty()} / OFFLINE".trim()
+            },
             title = "Sessions",
             action = {
                 Row {
+                    IconButton(onClick = onShowNotificationHistory) {
+                        Icon(Icons.Default.History, contentDescription = "Notification history")
+                    }
+                    Box {
+                        IconButton(onClick = { showSortMenu = true }) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Sort,
+                                contentDescription = "Sort by ${terminalSortMode.label}"
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showSortMenu,
+                            onDismissRequest = { showSortMenu = false }
+                        ) {
+                            TerminalSortMode.entries.forEach { sortMode ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            sortMode.label,
+                                            color = if (terminalSortMode == sortMode) Sky else {
+                                                MaterialTheme.colorScheme.onSurface
+                                            }
+                                        )
+                                    },
+                                    onClick = {
+                                        onSetSortMode(sortMode)
+                                        showSortMenu = false
+                                    }
+                                )
+                            }
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                            DropdownMenuItem(
+                                text = { Text("Disconnect server") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.PowerSettingsNew,
+                                        contentDescription = null,
+                                        tint = Muted
+                                    )
+                                },
+                                onClick = {
+                                    showSortMenu = false
+                                    onDisconnect()
+                                }
+                            )
+                        }
+                    }
                     IconButton(onClick = onRefresh, enabled = !isRefreshing) {
                         if (isRefreshing) {
                             CircularProgressIndicator(
@@ -811,13 +911,6 @@ private fun SessionDrawerContent(
                             Icon(Icons.Default.Refresh, contentDescription = "Refresh sessions")
                         }
                     }
-                    IconButton(onClick = onDisconnect) {
-                        Icon(
-                            Icons.Default.PowerSettingsNew,
-                            contentDescription = "Disconnect ${profile?.name.orEmpty()}",
-                            tint = Muted
-                        )
-                    }
                 }
             },
             navigation = {
@@ -826,104 +919,6 @@ private fun SessionDrawerContent(
                 }
             }
         )
-        val connectedProfiles = profiles.filter { it.id in connectedProfileIds }
-        if (connectedProfiles.isNotEmpty()) {
-            Text(
-                "CONNECTED SERVERS",
-                color = Muted,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.9.sp,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 20.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                connectedProfiles.forEach { connectedProfile ->
-                    FilterChip(
-                        selected = connectedProfile.id == profile?.id,
-                        onClick = { onSwitchServer(connectedProfile.id) },
-                        label = { Text(connectedProfile.name) },
-                        leadingIcon = {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .clip(CircleShape)
-                                    .background(Success)
-                            )
-                        }
-                    )
-                }
-            }
-        }
-        Text(
-            if (sessions.size == 1) "1 LIVE TMUX SESSION" else "${sessions.size} LIVE TMUX SESSIONS",
-            color = Muted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.8.sp,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 20.dp, end = 12.dp, top = 2.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                when (notificationTerminalIds.size) {
-                    0 -> "TERMINAL ALERTS · OFF"
-                    1 -> "TERMINAL ALERTS · 1 TERMINAL"
-                    else -> "TERMINAL ALERTS · ${notificationTerminalIds.size} TERMINALS"
-                },
-                color = if (notificationTerminalIds.isEmpty()) Success else Attention,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 0.8.sp,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onShowNotificationHistory) {
-                Text(
-                    if (notificationHistoryCount == 0) {
-                        "History"
-                    } else {
-                        "History · ${notificationHistoryCount.coerceAtMost(99)}" +
-                            if (notificationHistoryCount > 99) "+" else ""
-                    }
-                )
-            }
-        }
-        Text(
-            "SORT TERMINALS",
-            color = Muted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.9.sp,
-            modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TerminalSortMode.entries.forEach { sortMode ->
-                FilterChip(
-                    selected = terminalSortMode == sortMode,
-                    onClick = { onSetSortMode(sortMode) },
-                    label = { Text(sortMode.label) }
-                )
-            }
-        }
         if (sessions.isEmpty() && !isRefreshing) {
             Box(
                 modifier = Modifier
@@ -954,7 +949,9 @@ private fun SessionDrawerContent(
                 sessions = sessions,
                 pinnedTerminalIds = pinnedTerminalIds,
                 unreadAttentionTerminalIds = unreadAttentionTerminalIds,
-                sortMode = terminalSortMode
+                sortMode = terminalSortMode,
+                interactionTimes = terminalInteractionTimes,
+                activityTimes = terminalActivityTimes
             )
             LazyColumn(
                 state = terminalListState,
@@ -972,7 +969,7 @@ private fun SessionDrawerContent(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .background(Ink)
-                                .padding(top = 14.dp, bottom = 8.dp)
+                                .padding(top = 10.dp, bottom = 5.dp)
                         ) {
                             Text(
                                 group.title,
@@ -981,32 +978,10 @@ private fun SessionDrawerContent(
                                     SessionGroupKind.PINNED -> Sky
                                     else -> MaterialTheme.colorScheme.onBackground
                                 },
-                                fontWeight = FontWeight.SemiBold,
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                group.subtitle,
-                                color = when (group.kind) {
-                                    SessionGroupKind.ATTENTION -> Attention
-                                    SessionGroupKind.PINNED -> Sky
-                                    else -> Muted
-                                },
+                                fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
-                                fontSize = if (group.kind == SessionGroupKind.PROJECT) {
-                                    11.sp
-                                } else {
-                                    9.sp
-                                },
-                                fontWeight = if (group.kind == SessionGroupKind.PROJECT) {
-                                    FontWeight.Normal
-                                } else {
-                                    FontWeight.Bold
-                                },
-                                letterSpacing = if (group.kind == SessionGroupKind.PROJECT) {
-                                    0.sp
-                                } else {
-                                    0.7.sp
-                                },
+                                fontSize = 10.sp,
+                                letterSpacing = 0.7.sp,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
@@ -1019,7 +994,7 @@ private fun SessionDrawerContent(
                             notificationsEnabled =
                                 session.terminalId in notificationTerminalIds,
                             pinned = session.terminalId in pinnedTerminalIds,
-                            showProject = group.kind != SessionGroupKind.PROJECT,
+                            connectionOnline = connectionOnline,
                             onToggleNotifications = {
                                 onToggleNotifications(session.terminalId, it)
                             },
@@ -1291,14 +1266,15 @@ private fun SessionCard(
     selected: Boolean,
     notificationsEnabled: Boolean,
     pinned: Boolean,
-    showProject: Boolean,
+    connectionOnline: Boolean,
     onToggleNotifications: (Boolean) -> Unit,
     onTogglePinned: (Boolean) -> Unit,
     onClick: () -> Unit
 ) {
-    val stateColor = stateColor(session.state)
+    val stateColor = if (connectionOnline) stateColor(session.state) else Muted
+    val status = if (connectionOnline) stateLabel(session.state) else "OFFLINE"
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(14.dp),
         color = if (selected) SlateRaised else Slate,
         border = BorderStroke(
             width = if (selected) 1.5.dp else 1.dp,
@@ -1308,73 +1284,52 @@ private fun SessionCard(
         ),
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
-            Box(
-                modifier = Modifier
-                    .width(5.dp)
-                    .fillMaxHeight()
-                    .background(stateColor)
-            )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = connectionOnline && !session.paneDead, onClick = onClick)
+                .padding(start = 10.dp, top = 8.dp, bottom = 8.dp, end = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .clickable(enabled = !session.paneDead, onClick = onClick)
-                    .padding(horizontal = 15.dp, vertical = 13.dp)
+                modifier = Modifier.weight(1f)
             ) {
+                Text(
+                    session.name,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(3.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        session.name,
-                        fontWeight = FontWeight.SemiBold,
+                        session.projectName,
+                        color = Muted,
+                        style = MaterialTheme.typography.bodySmall,
                         modifier = Modifier.weight(1f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(stateColor)
+                    )
+                    Spacer(Modifier.width(5.dp))
                     Text(
-                        stateLabel(session.state),
+                        status,
                         color = stateColor,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    if (showProject) {
-                        "${session.projectName} · ${session.typeLabel}"
-                    } else {
-                        session.typeLabel
-                    },
-                    color = Muted,
-                    style = MaterialTheme.typography.bodySmall
-                )
-                if (session.paneTitle.isNotBlank()) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        session.paneTitle,
-                        color = Sky,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                if (session.dangerousMode) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "UNSAFE PERMISSIONS",
-                        color = Danger,
-                        fontSize = 10.sp,
+                        fontSize = 9.sp,
                         fontWeight = FontWeight.Bold,
-                        letterSpacing = 0.8.sp
+                        letterSpacing = 0.5.sp
                     )
                 }
             }
-            Row(
-                modifier = Modifier.padding(top = 8.dp, end = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 IconButton(
                     onClick = { onTogglePinned(!pinned) },
-                    modifier = Modifier.size(34.dp)
+                    modifier = Modifier.size(31.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.PushPin,
@@ -1384,14 +1339,14 @@ private fun SessionCard(
                             "Pin ${session.name}"
                         },
                         tint = if (pinned) Sky else Muted,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(17.dp)
                     )
                 }
                 if (session.profile == "codex" || session.profile == "claude") {
                     IconButton(
                         onClick = { onToggleNotifications(!notificationsEnabled) },
-                        enabled = !session.paneDead,
-                        modifier = Modifier.size(34.dp)
+                        enabled = connectionOnline && !session.paneDead,
+                        modifier = Modifier.size(31.dp)
                     ) {
                         Icon(
                             imageVector = if (notificationsEnabled) {
@@ -1405,7 +1360,7 @@ private fun SessionCard(
                                 "Enable attention notifications for ${session.name}"
                             },
                             tint = if (notificationsEnabled) Attention else Muted,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(17.dp)
                         )
                     }
                 }
@@ -1423,6 +1378,7 @@ fun SessionConsoleScreen(
     isSending: Boolean,
     onShowSessions: () -> Unit,
     onBrowseFiles: () -> Unit,
+    onRunActions: () -> Unit,
     onComposerChange: (String) -> Unit,
     onSend: () -> Unit,
     onTerminalKey: (TerminalKey) -> Unit,
@@ -1448,7 +1404,8 @@ fun SessionConsoleScreen(
             title = session?.name ?: "Session",
             onShowSessions = onShowSessions,
             subtitle = paneTitle.takeIf { it.isNotBlank() },
-            onBrowseFiles = onBrowseFiles
+            onBrowseFiles = onBrowseFiles,
+            onRunActions = onRunActions
         )
         Row(
             modifier = Modifier
@@ -1643,12 +1600,16 @@ fun RemoteFilesScreen(
     relativePath: String,
     files: List<RemoteFileEntry>,
     highlightedPath: String?,
+    preview: RemoteFilePreview?,
     isLoading: Boolean,
+    isLoadingPreview: Boolean,
     isDownloading: Boolean,
     downloadProgress: Int?,
     onBack: () -> Unit,
     onUp: () -> Unit,
     onOpenDirectory: (String) -> Unit,
+    onOpenFile: (RemoteFileEntry) -> Unit,
+    onClosePreview: () -> Unit,
     onDownload: (RemoteFileEntry) -> Unit
 ) {
     val fileListState = rememberLazyListState()
@@ -1709,6 +1670,14 @@ fun RemoteFilesScreen(
         }
         Box(modifier = Modifier.weight(1f)) {
             when {
+                preview != null -> {
+                    RemoteFilePreviewPane(
+                        preview = preview,
+                        onClose = onClosePreview,
+                        onDownload = { onDownload(preview.file) }
+                    )
+                }
+
                 isLoading && files.isEmpty() -> {
                     CircularProgressIndicator(
                         modifier = Modifier.align(Alignment.Center),
@@ -1767,7 +1736,7 @@ fun RemoteFilesScreen(
                                         if (file.isDirectory) {
                                             onOpenDirectory(file.relativePath)
                                         } else {
-                                            onDownload(file)
+                                            onOpenFile(file)
                                         }
                                     }
                             ) {
@@ -1825,12 +1794,13 @@ fun RemoteFilesScreen(
                                         )
                                     }
                                     if (!file.isDirectory) {
-                                        Icon(
-                                            Icons.Default.Download,
-                                            contentDescription = "Download ${file.name}",
-                                            tint = Sky,
-                                            modifier = Modifier.padding(8.dp)
-                                        )
+                                        IconButton(onClick = { onDownload(file) }) {
+                                            Icon(
+                                                Icons.Default.Download,
+                                                contentDescription = "Download ${file.name}",
+                                                tint = Sky
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1839,6 +1809,16 @@ fun RemoteFilesScreen(
                     }
                     if (isLoading) {
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            if (isLoadingPreview) {
+                Surface(
+                    color = Ink.copy(alpha = 0.72f),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(strokeWidth = 2.dp)
                     }
                 }
             }
@@ -1881,11 +1861,244 @@ fun RemoteFilesScreen(
 }
 
 @Composable
+private fun RemoteFilePreviewPane(
+    preview: RemoteFilePreview,
+    onClose: () -> Unit,
+    onDownload: () -> Unit
+) {
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(Icons.Default.Close, contentDescription = "Close file preview")
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    preview.file.name,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    formatFileSize(preview.file.sizeBytes),
+                    color = Muted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp
+                )
+            }
+            IconButton(onClick = onDownload) {
+                Icon(Icons.Default.Download, contentDescription = "Download ${preview.file.name}")
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        when (preview.kind) {
+            RemoteFilePreviewKind.TEXT -> {
+                val vertical = rememberScrollState()
+                val horizontal = rememberScrollState()
+                androidx.compose.foundation.text.selection.SelectionContainer {
+                    Text(
+                        preview.text,
+                        color = AnsiTerminalPalette.Foreground,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(AnsiTerminalPalette.Background)
+                            .horizontalScroll(horizontal)
+                            .verticalScroll(vertical)
+                            .padding(14.dp)
+                    )
+                }
+            }
+
+            RemoteFilePreviewKind.IMAGE -> {
+                val bitmap = remember(preview.file.relativePath, preview.bytes) {
+                    decodePreviewBitmap(preview.bytes)
+                }
+                if (bitmap == null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text("This image cannot be displayed on this phone.")
+                        Spacer(Modifier.height(12.dp))
+                        OutlinedButton(onClick = onDownload) { Text("Download file") }
+                    }
+                } else {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = preview.file.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black)
+                            .padding(8.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun decodePreviewBitmap(bytes: ByteArray): android.graphics.Bitmap? = runCatching {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    var sampleSize = 1
+    while (
+        bounds.outWidth / sampleSize > 4_096 ||
+        bounds.outHeight / sampleSize > 4_096
+    ) {
+        sampleSize *= 2
+    }
+    BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply { inSampleSize = sampleSize }
+    )
+}.getOrNull()
+
+@Composable
+fun ProjectActionsScreen(
+    projectName: String,
+    actions: List<ProjectAction>,
+    sessions: List<PanePilotSession>,
+    isLoading: Boolean,
+    runningActionId: String?,
+    onBack: () -> Unit,
+    onRun: (ProjectAction) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        BackHeader(
+            title = projectName.ifBlank { "Project Actions" },
+            subtitle = "ACTIONS",
+            onBack = onBack
+        )
+        when {
+            isLoading -> Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(strokeWidth = 2.dp)
+            }
+
+            actions.isEmpty() -> Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    "No project Actions",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Create Actions in PanePilot desktop. They are shared through .panepilot/actions.json.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            else -> LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    start = 16.dp,
+                    end = 16.dp,
+                    top = 8.dp,
+                    bottom = 24.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(actions, key = { it.id }) { action ->
+                    val liveSession = sessions.firstOrNull {
+                        it.actionId == action.id && !it.paneDead
+                    }
+                    Surface(
+                        color = Slate,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                color = PilotBlue.copy(alpha = 0.18f),
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("⚡", fontSize = 20.sp, modifier = Modifier.padding(10.dp))
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(action.name, fontWeight = FontWeight.SemiBold)
+                                Spacer(Modifier.height(3.dp))
+                                Text(
+                                    action.command,
+                                    color = Muted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Spacer(Modifier.width(10.dp))
+                            Button(
+                                onClick = { onRun(action) },
+                                enabled = runningActionId == null && liveSession == null,
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                                    horizontal = 14.dp,
+                                    vertical = 8.dp
+                                )
+                            ) {
+                                if (runningActionId == action.id) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.White
+                                    )
+                                } else {
+                                    Icon(
+                                        Icons.Default.PlayArrow,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (liveSession == null) "Run" else "Running")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SessionWorkspaceHeader(
     title: String,
     subtitle: String?,
     onShowSessions: () -> Unit,
-    onBrowseFiles: (() -> Unit)? = null
+    onBrowseFiles: (() -> Unit)? = null,
+    onRunActions: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -1918,6 +2131,11 @@ private fun SessionWorkspaceHeader(
         onBrowseFiles?.let { browse ->
             IconButton(onClick = browse) {
                 Icon(Icons.Default.Folder, contentDescription = "Browse project files")
+            }
+        }
+        onRunActions?.let { runActions ->
+            IconButton(onClick = runActions) {
+                Icon(Icons.Default.PlayArrow, contentDescription = "Run project Actions")
             }
         }
     }
@@ -1991,12 +2209,16 @@ private fun ScreenHeader(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.4.sp
+                letterSpacing = 1.4.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Text(
                 title,
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
         action()

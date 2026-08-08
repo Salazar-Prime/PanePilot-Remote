@@ -71,6 +71,41 @@ class SessionGroupsTest {
         assertEquals(listOf("New", "Old"), groups.single().sessions.map { it.name })
     }
 
+    @Test
+    fun recentSortUsesLatestInAppInteraction() {
+        val groups = sessionGroups(
+            sessions = listOf(
+                session("Created later", "/work/a", SessionState.IDLE, "2026-08-01T00:00:00Z"),
+                session("Touched", "/work/a", SessionState.IDLE, "2026-01-01T00:00:00Z")
+            ),
+            pinnedTerminalIds = emptySet(),
+            unreadAttentionTerminalIds = emptySet(),
+            sortMode = TerminalSortMode.NEWEST,
+            interactionTimes = mapOf("terminal-Touched" to 2_000_000_000_000L)
+        )
+
+        assertEquals(listOf("Touched", "Created later"), groups.single().sessions.map { it.name })
+    }
+
+    @Test
+    fun activitySortKeepsReadySessionAtItsStickyActivityPosition() {
+        val groups = sessionGroups(
+            sessions = listOf(
+                session("Ready", "/work/a", SessionState.READY),
+                session("Working", "/work/a", SessionState.RUNNING)
+            ),
+            pinnedTerminalIds = emptySet(),
+            unreadAttentionTerminalIds = emptySet(),
+            sortMode = TerminalSortMode.ACTIVITY,
+            activityTimes = mapOf(
+                "terminal-Ready" to 200L,
+                "terminal-Working" to 100L
+            )
+        )
+
+        assertEquals(listOf("Ready", "Working"), groups.single().sessions.map { it.name })
+    }
+
     private fun session(
         name: String,
         projectPath: String,

@@ -23,7 +23,9 @@ internal fun sessionGroups(
     sessions: List<PanePilotSession>,
     pinnedTerminalIds: Set<String>,
     unreadAttentionTerminalIds: Set<String>,
-    sortMode: TerminalSortMode
+    sortMode: TerminalSortMode,
+    interactionTimes: Map<String, Long> = emptyMap(),
+    activityTimes: Map<String, Long> = emptyMap()
 ): List<SessionGroup> {
     val attentionIds = sessions
         .filter {
@@ -33,13 +35,13 @@ internal fun sessionGroups(
         .mapTo(linkedSetOf()) { it.terminalId }
     val attention = sessions
         .filter { it.terminalId in attentionIds }
-        .sortedWith(sessionComparator(sortMode))
+        .sortedWith(sessionComparator(sortMode, interactionTimes, activityTimes))
     val pinned = sessions
         .filter {
             it.terminalId in pinnedTerminalIds &&
                 it.terminalId !in attentionIds
         }
-        .sortedWith(sessionComparator(sortMode))
+        .sortedWith(sessionComparator(sortMode, interactionTimes, activityTimes))
     val promotedIds = attentionIds + pinned.map { it.terminalId }
     val remaining = sessions.filterNot { it.terminalId in promotedIds }
 
@@ -81,7 +83,11 @@ internal fun sessionGroups(
                             subtitle = path,
                             kind = SessionGroupKind.PROJECT,
                             sessions = projectSessions.sortedWith(
-                                sessionComparator(TerminalSortMode.NAME)
+                                sessionComparator(
+                                    TerminalSortMode.NAME,
+                                    interactionTimes,
+                                    activityTimes
+                                )
                             )
                         )
                     )
@@ -93,23 +99,28 @@ internal fun sessionGroups(
                     title = "Terminals",
                     subtitle = "SORTED BY ${sortMode.label.uppercase()}",
                     kind = SessionGroupKind.TERMINALS,
-                    sessions = remaining.sortedWith(sessionComparator(sortMode))
+                    sessions = remaining.sortedWith(
+                        sessionComparator(sortMode, interactionTimes, activityTimes)
+                    )
                 )
             )
         }
     }
 }
 
-private fun sessionComparator(sortMode: TerminalSortMode): Comparator<PanePilotSession> =
+private fun sessionComparator(
+    sortMode: TerminalSortMode,
+    interactionTimes: Map<String, Long>,
+    activityTimes: Map<String, Long>
+): Comparator<PanePilotSession> =
     when (sortMode) {
-        TerminalSortMode.ACTIVITY -> compareBy<PanePilotSession>(
-            { statePriority(it.state) },
-            { it.name.lowercase() }
-        )
+        TerminalSortMode.ACTIVITY -> compareByDescending<PanePilotSession> {
+            activityTimes[it.terminalId] ?: createdAtMillis(it.createdAt)
+        }.thenBy { it.name.lowercase() }
 
         TerminalSortMode.NAME -> compareBy { it.name.lowercase() }
         TerminalSortMode.NEWEST -> compareByDescending<PanePilotSession> {
-            it.createdAt
+            interactionTimes[it.terminalId] ?: createdAtMillis(it.createdAt)
         }.thenBy { it.name.lowercase() }
 
         TerminalSortMode.PROJECT -> compareBy<PanePilotSession>(
@@ -118,11 +129,5 @@ private fun sessionComparator(sortMode: TerminalSortMode): Comparator<PanePilotS
         )
     }
 
-private fun statePriority(state: SessionState): Int = when (state) {
-    SessionState.NEEDS_INPUT -> 0
-    SessionState.RUNNING -> 1
-    SessionState.READY -> 2
-    SessionState.IDLE -> 3
-    SessionState.LIVE -> 4
-    SessionState.STOPPED -> 5
-}
+private fun createdAtMillis(value: String): Long =
+    runCatching { java.time.Instant.parse(value).toEpochMilli() }.getOrDefault(0L)

@@ -31,7 +31,10 @@ class TmuxGateway(private val ssh: SshConnection) {
             "#{@panepilot_dangerous_mode}",
             "#{@panepilot_session_kind}",
             "#{@panepilot_action_name}",
-            "#{@panepilot_latex_section_title}"
+            "#{@panepilot_latex_section_title}",
+            "#{@panepilot_action_id}",
+            "#{@panepilot_action_command}",
+            "#{@panepilot_action_exit_status}"
         ).joinToString(FIELD_SEPARATOR.toString())
         val result = ssh.execute(
             "${shellQuote(tmux)} list-sessions -F ${shellQuote(format)}",
@@ -110,6 +113,103 @@ class TmuxGateway(private val ssh: SshConnection) {
         }
     }
 
+    fun runAction(
+        projectId: String,
+        projectPath: String,
+        action: com.panepilot.remote.model.ProjectAction
+    ): ActionLaunch {
+        require(UUID_PATTERN.matches(projectId)) { "The project identity is invalid." }
+        require(UUID_PATTERN.matches(action.id)) { "The Action identity is invalid." }
+        require(action.name.isNotBlank() && action.name.length <= 80) {
+            "Action names must be between 1 and 80 characters."
+        }
+        require(action.name.none { it.code in 0..31 || it.code == 127 }) {
+            "The Action name contains unsupported characters."
+        }
+        require(action.command.isNotBlank() && action.command.length <= 4_096) {
+            "Action commands must be between 1 and 4096 characters."
+        }
+        require(!action.command.contains('\u0000')) { "The Action command is invalid." }
+        require(projectPath.startsWith('/')) { "The project folder is invalid." }
+
+        val tmux = resolveTmux()
+        killPriorActionSessions(tmux, action.id)
+        val terminalId = UUID.randomUUID().toString()
+        val suffix = terminalId.take(4)
+        val baseName = "Action · ${action.name}"
+            .replace(Regex("[:\\u0000-\\u001f\\u007f]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .take(70)
+            .ifBlank { "Action" }
+        val sessionName = "$baseName · $suffix"
+        val createdAt = java.time.Instant.now().toString()
+        val launchCommand = actionLaunchCommand(
+            tmux = tmux,
+            terminalId = terminalId,
+            projectId = projectId,
+            projectPath = projectPath,
+            createdAt = createdAt,
+            action = action
+        )
+        val command =
+            "${shellQuote(tmux)} new-session -d -s ${shellQuote(sessionName)} " +
+                "-c ${shellQuote(projectPath)} ${shellQuote(launchCommand)} && " +
+                "panepilot_action_attempt=0; while [ \"\$panepilot_action_attempt\" -lt 40 ]; do " +
+                "if [ \"\$(${shellQuote(tmux)} show-option -qv -t " +
+                "${shellQuote("=$sessionName")} ${shellQuote("@panepilot_managed")})\" = 1 ]; " +
+                "then exit 0; fi; panepilot_action_attempt=\$((panepilot_action_attempt + 1)); " +
+                "sleep 0.05; done; exit 6"
+        val result = ssh.execute(command, timeoutMs = 20_000L, maxOutputBytes = 64 * 1024)
+        if (result.exitCode != 0) {
+            throw IllegalStateException(result.stderr.trim().ifBlank {
+                "Tmux could not start ${action.name}."
+            })
+        }
+        return ActionLaunch(sessionName, terminalId)
+    }
+
+    private fun killPriorActionSessions(tmux: String, actionId: String) {
+        val format = listOf(
+            "#{session_name}",
+            "#{@panepilot_action_id}",
+            "#{pane_dead}",
+            "#{@panepilot_action_exit_status}"
+        ).joinToString(FIELD_SEPARATOR.toString())
+        val listed = ssh.execute(
+            "${shellQuote(tmux)} list-sessions -F ${shellQuote(format)}",
+            maxOutputBytes = 128 * 1024
+        )
+        if (listed.exitCode != 0) return
+        val priorSessions = listed.stdout.lineSequence().mapNotNull { line ->
+            val fields = if (line.contains(FIELD_SEPARATOR)) {
+                line.split(FIELD_SEPARATOR, limit = 4)
+            } else {
+                line.split(ESCAPED_FIELD_SEPARATOR, limit = 4)
+            }
+            val name = fields.getOrNull(0).orEmpty()
+            if (
+                fields.getOrNull(1) == actionId &&
+                name.isNotBlank() &&
+                name.length <= 80 &&
+                name.none { it == ':' || it.code in 0..31 || it.code == 127 }
+            ) {
+                Triple(name, fields.getOrNull(2) == "1", fields.getOrNull(3).orEmpty())
+            } else {
+                null
+            }
+        }.toList()
+        if (priorSessions.any { (_, paneDead, exitStatus) -> !paneDead && exitStatus.isBlank() }) {
+            throw IllegalStateException("This Action is already running.")
+        }
+        priorSessions.forEach { (name) ->
+                ssh.execute(
+                    "${shellQuote(tmux)} kill-session -t ${shellQuote("=$name")}",
+                    maxOutputBytes = 16 * 1024
+                )
+        }
+    }
+
     private fun resolveTmux(): String {
         tmuxPath?.let { return it }
         val result = ssh.execute(RESOLVE_TMUX_COMMAND, maxOutputBytes = 16 * 1024)
@@ -161,6 +261,47 @@ class TmuxGateway(private val ssh: SshConnection) {
                 "-t ${shellQuote(target)} && sleep 0.20 && " +
                 "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} C-m"
 
+        internal fun actionLaunchCommand(
+            tmux: String,
+            terminalId: String,
+            projectId: String,
+            projectPath: String,
+            createdAt: String,
+            action: com.panepilot.remote.model.ProjectAction
+        ): String {
+            val executable = shellQuote(tmux)
+            fun encoded(value: String): String = Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(value.toByteArray(Charsets.UTF_8))
+            fun setOption(key: String, value: String): String =
+                "$executable set-option -q -t \"\$TMUX_PANE\" ${shellQuote(key)} " +
+                    shellQuote(value)
+            return listOf(
+                setOption("@panepilot_managed", "0"),
+                setOption("@panepilot_schema", "1"),
+                setOption("@panepilot_terminal_id", terminalId),
+                setOption("@panepilot_project_id", projectId),
+                setOption("@panepilot_project_path", encoded(projectPath)),
+                setOption("@panepilot_profile", "custom"),
+                setOption("@panepilot_created_at", createdAt),
+                setOption("@panepilot_dangerous_mode", "0"),
+                setOption("@panepilot_session_kind", "action"),
+                setOption("@panepilot_action_id", action.id),
+                setOption("@panepilot_action_name", encoded(action.name)),
+                setOption("@panepilot_action_command", encoded(action.command)),
+                setOption("@panepilot_managed", "1"),
+                "$executable set-option -q -p -t \"\$TMUX_PANE\" remain-on-exit on",
+                "$executable set-option -q -u -t \"\$TMUX_PANE\" " +
+                    shellQuote("@panepilot_action_exit_status") + " 2>/dev/null || true",
+                "( ${action.command}\n)",
+                "panepilot_action_status=\$?",
+                "$executable set-option -q -t \"\$TMUX_PANE\" " +
+                    shellQuote("@panepilot_action_exit_status") +
+                    " \"\$panepilot_action_status\" || true",
+                "exit \"\$panepilot_action_status\""
+            ).joinToString("; ")
+        }
+
         internal fun tmuxKeyName(key: TerminalKey): String = when (key) {
             TerminalKey.ENTER -> "C-m"
             TerminalKey.ESCAPE -> "Escape"
@@ -203,7 +344,7 @@ class TmuxGateway(private val ssh: SshConnection) {
             } else {
                 line.split(ESCAPED_FIELD_SEPARATOR)
             }
-            if (fields.size != 16 || fields[5] != "1" || fields[6] != "1") return null
+            if (fields.size != 19 || fields[5] != "1" || fields[6] != "1") return null
             val name = fields[0]
             val attached = fields[1].toIntOrNull() ?: return null
             val title = fields[2]
@@ -239,7 +380,10 @@ class TmuxGateway(private val ssh: SshConnection) {
                 sessionKind = fields[13].ifBlank { "terminal" },
                 actionName = decodeMetadata(fields[14], 80),
                 latexSectionTitle = decodeMetadata(fields[15], 1_024),
-                state = stateFrom(title, profile, paneDead)
+                state = stateFrom(title, profile, paneDead),
+                actionId = fields[16].takeIf(UUID_PATTERN::matches),
+                actionCommand = decodeMetadata(fields[17], 4_096),
+                actionExitCode = fields[18].toIntOrNull()
             )
         }
 
@@ -261,6 +405,11 @@ class TmuxGateway(private val ssh: SshConnection) {
         }
     }
 }
+
+data class ActionLaunch(
+    val sessionName: String,
+    val terminalId: String
+)
 
 data class PaneSnapshot(
     val paneTitle: String,

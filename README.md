@@ -15,14 +15,17 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Password or imported private-key authentication
 - Optional password storage encrypted with Android Keystore
 - SSH host-key verification and saved `known_hosts`
-- PanePilot session discovery with activity, name, newest, and project sorting
+- PanePilot session discovery with activity, name, recent-use, and project sorting
 - Persisted per-server terminal pinning for quick access
-- A hideable side pane for switching between projects and sessions
+- A compact hideable side pane with header-based history and sorting controls
+- Optional emoji identities for SSH server sessions, configured when editing a server
 - Codex progress state from the tmux pane title
 - Bounded, auto-refreshing pane snapshots with ANSI terminal colors
 - Multiline agent messages sent through a temporary tmux buffer
 - A top-mounted mobile key strip for Enter, Esc, Tab, arrows, and common Ctrl combinations
-- Project-scoped remote file browsing with downloads through Android's system file picker
+- Project-scoped remote file browsing with bounded text and image previews
+- Downloads for every file type through Android's system file picker
+- Project Actions loaded from `.panepilot/actions.json` and run in tagged tmux sessions
 - Per-terminal alerts when a Codex or Claude session needs input or finishes a response
 - A dedicated unread attention queue that stays above pinned and sorted terminals
 - Separate Android categories and notification groups for connection status, agent
@@ -33,7 +36,8 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
 The app is a focused monitor and message composer, not a full terminal emulator. It
-does not create, rename, stop, archive, or delete sessions.
+can launch shared project Actions, but does not create, rename, stop, archive, or
+delete ordinary terminal sessions.
 
 ## Requirements
 
@@ -107,24 +111,26 @@ and allow installation from that file source when Android asks.
    from the server or hosting provider before choosing **Trust and connect**.
 5. Choose a live session, watch its pane snapshot, and use the bottom composer to send
    a prompt.
-6. Use the folder button in a session header to browse its remote project and save a
-   file to any location offered by Android.
-7. Connect any additional servers you want to keep warm. Connected servers appear as
-   a switcher at the top of the session side pane, and tapping one changes servers
-   without disconnecting the others.
-8. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
+6. Use the folder button in a terminal header to browse its remote project. Tap UTF-8
+   text or a common image to preview it; use the download button for any file type.
+7. Use the play button next to the folder button to run Actions shared by PanePilot
+   desktop through `.panepilot/actions.json`. Each run opens as a tagged tmux session.
+8. Connect any additional servers you want to keep warm. Return to the server list to
+   switch between them without disconnecting the others. Edit a server to assign it
+   an emoji identity.
+9. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
    input or finishes a response moves into the **Needs attention** section at the top
    of the list until you open it. Open **History** to review alerts sent since version
    0.6.0; tapping a history entry opens its exact server and terminal. The persistent
    monitor keeps every connected server online and stops an individual connection
    only when you explicitly disconnect it. On Android 13 and newer, approve the
    notification permission the first time.
-9. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
-   open its folder in Remote Files; file paths are highlighted and remain one tap away
-   from downloading.
-10. Pin frequently used terminals with the pin button. Choose **Activity**, **Name**,
-    **Newest**, or **Project** above the terminal list; the choice and pins are saved
-    separately for each server.
+10. Tap an HTTP(S) link in the terminal to open it in the browser. Tap a project path to
+    open its folder in Remote Files; supported files open directly in the viewer.
+11. Pin frequently used terminals with the top button in each card and control alerts
+    with the bell below it. Use the sort icon for **Activity**, **Name**, **Recent**, or
+    **Project**. Recent follows taps and input made in this Android app; Activity keeps
+    the latest output/state transition at the top, including after Working becomes Ready.
 
 If a legitimate server is rebuilt and its host key changes, edit that server and use
 **Forget saved host key** only after independently verifying the new fingerprint.
@@ -142,7 +148,10 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
 - Session names are always passed as exact tmux targets (`=session-name:`).
 - The transcript is capped to the most recent 300 pane lines and 768 KB per refresh.
 - File browsing is bounded to the session's project folder. Symbolic links are omitted,
-  and file bytes stream directly from SFTP into the Android destination you select.
+  UTF-8 text previews are capped at 1 MB, image previews at 12 MB, and file bytes stream
+  directly from SFTP into the Android destination you select.
+- Action definitions are read-only on Android. A run is tagged with the same versioned
+  tmux metadata as PanePilot desktop and replaces the prior tmux run for that Action.
 - A low-priority foreground-service notification keeps every connected server's SSH
   and attention polling active after leaving or swiping away the app, even when no
   terminal bell is enabled. Its **Stop all** action disables terminal bells and ends

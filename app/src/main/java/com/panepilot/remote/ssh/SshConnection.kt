@@ -171,6 +171,7 @@ class SshConnection(
                 exitCode = channel.exitStatus
             )
         } catch (error: JSchException) {
+            disconnect()
             throw connectionError(error)
         } finally {
             channel.disconnect()
@@ -186,6 +187,7 @@ class SshConnection(
             channel.connect(CONNECT_TIMEOUT_MS)
             return block(channel)
         } catch (error: JSchException) {
+            disconnect()
             throw connectionError(error)
         } catch (error: SftpException) {
             throw IllegalStateException(

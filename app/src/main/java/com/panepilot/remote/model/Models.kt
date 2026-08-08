@@ -14,7 +14,8 @@ data class ServerProfile(
     val port: Int = 22,
     val username: String,
     val authMode: AuthMode,
-    val keyDisplayName: String? = null
+    val keyDisplayName: String? = null,
+    val icon: String? = null
 )
 
 data class ConnectionSecret(
@@ -35,6 +36,24 @@ data class RemoteDownloadRequest(
     val file: RemoteFileEntry
 )
 
+enum class RemoteFilePreviewKind {
+    TEXT,
+    IMAGE
+}
+
+data class RemoteFilePreview(
+    val file: RemoteFileEntry,
+    val kind: RemoteFilePreviewKind,
+    val text: String = "",
+    val bytes: ByteArray = byteArrayOf()
+)
+
+data class ProjectAction(
+    val id: String,
+    val name: String,
+    val command: String
+)
+
 enum class SessionState {
     NEEDS_INPUT,
     RUNNING,
@@ -47,7 +66,7 @@ enum class SessionState {
 enum class TerminalSortMode(val label: String) {
     ACTIVITY("Activity"),
     NAME("Name"),
-    NEWEST("Newest"),
+    NEWEST("Recent"),
     PROJECT("Project")
 }
 
@@ -79,7 +98,10 @@ data class PanePilotSession(
     val sessionKind: String,
     val actionName: String?,
     val latexSectionTitle: String?,
-    val state: SessionState
+    val state: SessionState,
+    val actionId: String? = null,
+    val actionCommand: String? = null,
+    val actionExitCode: Int? = null
 ) {
     val projectName: String
         get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { projectPath }

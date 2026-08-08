@@ -3,7 +3,12 @@ package com.panepilot.remote.ssh
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.SftpProgressMonitor
 import com.panepilot.remote.model.RemoteFileEntry
+import com.panepilot.remote.model.RemoteFilePreview
+import com.panepilot.remote.model.RemoteFilePreviewKind
+import java.io.ByteArrayOutputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import java.util.Vector
 
 data class RemoteFileLocation(
@@ -71,6 +76,67 @@ class RemoteFileGateway(private val ssh: SshConnection) {
                     selectedFileRelativePath = relative
                 )
             }
+        }
+    }
+
+    fun preview(rootPath: String, file: RemoteFileEntry): RemoteFilePreview? {
+        require(!file.isDirectory) { "Folders cannot be previewed as files." }
+        val extension = file.name.substringAfterLast('.', "").lowercase()
+        val image = extension in IMAGE_EXTENSIONS
+        val maximum = if (image) MAX_IMAGE_PREVIEW_BYTES else MAX_TEXT_PREVIEW_BYTES
+        if (file.sizeBytes > maximum) return null
+        val bytes = readBoundedFile(rootPath, file.relativePath, maximum)
+        if (image) {
+            return RemoteFilePreview(
+                file = file,
+                kind = RemoteFilePreviewKind.IMAGE,
+                bytes = bytes
+            )
+        }
+        val text = decodeUtf8Text(bytes) ?: return null
+        return RemoteFilePreview(
+            file = file,
+            kind = RemoteFilePreviewKind.TEXT,
+            text = text
+        )
+    }
+
+    internal fun readTextFile(
+        rootPath: String,
+        relativePath: String,
+        maximumBytes: Int
+    ): String? = decodeUtf8Text(readBoundedFile(rootPath, relativePath, maximumBytes.toLong()))
+
+    private fun readBoundedFile(
+        rootPath: String,
+        relativePath: String,
+        maximumBytes: Long
+    ): ByteArray {
+        val normalized = normalizeRelativePath(relativePath)
+        require(normalized.isNotEmpty()) { "Choose a remote file." }
+        return ssh.withSftp { sftp ->
+            val root = canonicalRoot(sftp, rootPath)
+            val remoteFile = resolveWithinRoot(sftp, root, normalized)
+            val attributes = sftp.stat(remoteFile)
+            require(!attributes.isDir && !attributes.isLink) {
+                "Only regular project files can be opened."
+            }
+            require(attributes.size in 0..maximumBytes) {
+                "This file is too large to preview. Download it instead."
+            }
+            val output = ByteArrayOutputStream(attributes.size.toInt().coerceAtLeast(32))
+            sftp.get(remoteFile).use { input ->
+                val buffer = ByteArray(16 * 1_024)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    require(output.size().toLong() + count <= maximumBytes) {
+                        "This file is too large to preview. Download it instead."
+                    }
+                    output.write(buffer, 0, count)
+                }
+            }
+            output.toByteArray()
         }
     }
 
@@ -158,6 +224,20 @@ class RemoteFileGateway(private val ssh: SshConnection) {
     companion object {
         private const val MAX_DIRECTORY_ENTRIES = 10_000
         private const val MAX_FILE_NAME_LENGTH = 255
+        private const val MAX_TEXT_PREVIEW_BYTES = 1_048_576L
+        private const val MAX_IMAGE_PREVIEW_BYTES = 12_582_912L
+        private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp")
+
+        internal fun decodeUtf8Text(bytes: ByteArray): String? {
+            if (bytes.any { it == 0.toByte() }) return null
+            return runCatching {
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString()
+            }.getOrNull()
+        }
 
         internal fun normalizeRelativePath(path: String): String {
             if (path.isBlank()) return ""

@@ -2,6 +2,7 @@ package com.panepilot.remote.ssh
 
 import com.panepilot.remote.model.SessionState
 import com.panepilot.remote.model.TerminalKey
+import com.panepilot.remote.model.ProjectAction
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -29,6 +30,9 @@ class TmuxGatewayTest {
             "2026-07-25T00:00:00.000Z",
             "0",
             "terminal",
+            "",
+            "",
+            "",
             "",
             ""
         )
@@ -60,6 +64,9 @@ class TmuxGatewayTest {
             "2026-07-26T03:32:06.581Z",
             "1",
             "terminal",
+            "",
+            "",
+            "",
             "",
             ""
         )
@@ -125,5 +132,27 @@ class TmuxGatewayTest {
         assertEquals("C-c", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_C))
         assertEquals("C-d", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_D))
         assertEquals("C-l", TmuxGateway.tmuxKeyName(TerminalKey.CTRL_L))
+    }
+
+    @Test
+    fun `action launch tags the tmux pane before running the shared command`() {
+        val command = TmuxGateway.actionLaunchCommand(
+            tmux = "/usr/bin/tmux",
+            terminalId = "2c4f2d29-2985-4f48-a846-85ff0638984c",
+            projectId = "b50a1e21-fbb4-4103-b287-7586411e6716",
+            projectPath = "/srv/panepilot",
+            createdAt = "2026-08-08T00:00:00Z",
+            action = ProjectAction(
+                id = "9af2aa17-6a84-4215-91fe-7dbddf6b348f",
+                name = "Run tests",
+                command = "npm test"
+            )
+        )
+
+        assertTrue(command.contains("@panepilot_session_kind"))
+        assertTrue(command.contains("@panepilot_action_id"))
+        assertTrue(command.contains("remain-on-exit on"))
+        assertTrue(command.contains("( npm test"))
+        assertTrue(command.indexOf("@panepilot_managed") < command.indexOf("( npm test"))
     }
 }

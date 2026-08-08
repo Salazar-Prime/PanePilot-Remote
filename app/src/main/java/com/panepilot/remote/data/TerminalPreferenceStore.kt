@@ -27,13 +27,44 @@ class TerminalPreferenceStore(context: Context) {
         preferences.edit().putString(sortKey(profileId), sortMode.name).apply()
     }
 
+    fun interactionTimes(profileId: String, terminalIds: Collection<String>): Map<String, Long> =
+        terminalIds.associateWith { terminalId ->
+            preferences.getLong(interactionKey(profileId, terminalId), 0L)
+        }.filterValues { it > 0L }
+
+    fun activityTimes(profileId: String, terminalIds: Collection<String>): Map<String, Long> =
+        terminalIds.associateWith { terminalId ->
+            preferences.getLong(activityKey(profileId, terminalId), 0L)
+        }.filterValues { it > 0L }
+
+    fun markInteraction(profileId: String, terminalId: String, atMillis: Long): Long {
+        preferences.edit().putLong(interactionKey(profileId, terminalId), atMillis).apply()
+        return atMillis
+    }
+
+    fun markActivity(profileId: String, terminalId: String, atMillis: Long): Long {
+        preferences.edit().putLong(activityKey(profileId, terminalId), atMillis).apply()
+        return atMillis
+    }
+
     fun removeProfile(profileId: String) {
-        preferences.edit()
+        val editor = preferences.edit()
             .remove(pinsKey(profileId))
             .remove(sortKey(profileId))
-            .apply()
+        preferences.all.keys
+            .filter {
+                it.startsWith("icon:$profileId:") ||
+                    it.startsWith("interaction:$profileId:") ||
+                    it.startsWith("activity:$profileId:")
+            }
+            .forEach(editor::remove)
+        editor.apply()
     }
 
     private fun pinsKey(profileId: String) = "pins:$profileId"
     private fun sortKey(profileId: String) = "sort:$profileId"
+    private fun interactionKey(profileId: String, terminalId: String) =
+        "interaction:$profileId:$terminalId"
+    private fun activityKey(profileId: String, terminalId: String) =
+        "activity:$profileId:$terminalId"
 }

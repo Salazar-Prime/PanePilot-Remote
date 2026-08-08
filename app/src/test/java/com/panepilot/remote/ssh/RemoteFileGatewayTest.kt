@@ -76,4 +76,17 @@ class RemoteFileGatewayTest {
             )
         }
     }
+
+    @Test
+    fun previewTextRequiresStrictUtf8AndRejectsBinaryBytes() {
+        assertEquals(
+            "hello λ",
+            RemoteFileGateway.decodeUtf8Text("hello λ".toByteArray())
+        )
+        assertEquals(null, RemoteFileGateway.decodeUtf8Text(byteArrayOf(0, 1, 2)))
+        assertEquals(
+            null,
+            RemoteFileGateway.decodeUtf8Text(byteArrayOf(0xC3.toByte(), 0x28))
+        )
+    }
 }

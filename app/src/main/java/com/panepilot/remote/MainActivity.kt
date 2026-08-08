@@ -31,6 +31,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.panepilot.remote.ui.CredentialsScreen
 import com.panepilot.remote.ui.HostKeyDialog
 import com.panepilot.remote.ui.PanePilotTheme
+import com.panepilot.remote.ui.ProjectActionsScreen
 import com.panepilot.remote.ui.RemoteFilesScreen
 import com.panepilot.remote.ui.ServerEditorScreen
 import com.panepilot.remote.ui.ServerListScreen
@@ -188,8 +189,8 @@ class MainActivity : ComponentActivity() {
 
                             AppScreen.Sessions, is AppScreen.Console -> SessionWorkspaceScreen(
                                 profile = state.connectedProfile,
-                                profiles = state.profiles,
-                                connectedProfileIds = state.connectedProfileIds,
+                                connectionOnline = state.connectedProfile?.id in
+                                    state.connectedProfileIds,
                                 sessions = state.sessions,
                                 selectedSession = state.selectedSession,
                                 transcript = state.transcript,
@@ -199,7 +200,6 @@ class MainActivity : ComponentActivity() {
                                 isSending = state.isSending,
                                 onRefresh = appViewModel::refreshSessions,
                                 onShowServers = appViewModel::showServers,
-                                onSwitchServer = appViewModel::openServer,
                                 onDisconnect = appViewModel::disconnect,
                                 onOpenSession = appViewModel::openConsole,
                                 onComposerChange = appViewModel::updateComposer,
@@ -210,6 +210,8 @@ class MainActivity : ComponentActivity() {
                                 unreadAttentionTerminalIds =
                                     state.unreadAttentionTerminalIds,
                                 pinnedTerminalIds = state.pinnedTerminalIds,
+                                terminalInteractionTimes = state.terminalInteractionTimes,
+                                terminalActivityTimes = state.terminalActivityTimes,
                                 terminalSortMode = state.terminalSortMode,
                                 notificationHistory = state.notificationHistory,
                                 onToggleNotifications = { terminalId, enabled ->
@@ -241,6 +243,7 @@ class MainActivity : ComponentActivity() {
                                 onOpenNotificationHistoryEntry =
                                     appViewModel::openAttentionTarget,
                                 onBrowseFiles = appViewModel::openFiles,
+                                onRunActions = appViewModel::openActions,
                                 onOpenUrl = { value ->
                                     val uri = Uri.parse(value)
                                     if (uri.scheme !in setOf("http", "https")) {
@@ -266,13 +269,27 @@ class MainActivity : ComponentActivity() {
                                 relativePath = state.remoteFilePath,
                                 files = state.remoteFiles,
                                 highlightedPath = state.highlightedRemoteFilePath,
+                                preview = state.remoteFilePreview,
                                 isLoading = state.isLoadingFiles,
+                                isLoadingPreview = state.isLoadingFilePreview,
                                 isDownloading = state.isDownloading,
                                 downloadProgress = state.downloadProgress,
                                 onBack = appViewModel::goBack,
                                 onUp = appViewModel::goUpRemoteDirectory,
                                 onOpenDirectory = appViewModel::openRemoteDirectory,
+                                onOpenFile = appViewModel::openRemoteFile,
+                                onClosePreview = appViewModel::closeRemoteFilePreview,
                                 onDownload = appViewModel::requestDownload
+                            )
+
+                            is AppScreen.Actions -> ProjectActionsScreen(
+                                projectName = state.selectedSession?.projectName.orEmpty(),
+                                actions = state.projectActions,
+                                sessions = state.sessions,
+                                isLoading = state.isLoadingActions,
+                                runningActionId = state.runningActionId,
+                                onBack = appViewModel::goBack,
+                                onRun = appViewModel::runProjectAction
                             )
                         }
                     }
