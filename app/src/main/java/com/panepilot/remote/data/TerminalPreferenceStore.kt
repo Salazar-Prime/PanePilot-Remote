@@ -47,10 +47,18 @@ class TerminalPreferenceStore(context: Context) {
         return atMillis
     }
 
+    fun lastSelectedTerminalId(profileId: String): String? =
+        preferences.getString(lastSelectedKey(profileId), null)
+
+    fun setLastSelectedTerminalId(profileId: String, terminalId: String) {
+        preferences.edit().putString(lastSelectedKey(profileId), terminalId).apply()
+    }
+
     fun removeProfile(profileId: String) {
         val editor = preferences.edit()
             .remove(pinsKey(profileId))
             .remove(sortKey(profileId))
+            .remove(lastSelectedKey(profileId))
         preferences.all.keys
             .filter {
                 it.startsWith("icon:$profileId:") ||
@@ -63,6 +71,7 @@ class TerminalPreferenceStore(context: Context) {
 
     private fun pinsKey(profileId: String) = "pins:$profileId"
     private fun sortKey(profileId: String) = "sort:$profileId"
+    private fun lastSelectedKey(profileId: String) = "last-selected:$profileId"
     private fun interactionKey(profileId: String, terminalId: String) =
         "interaction:$profileId:$terminalId"
     private fun activityKey(profileId: String, terminalId: String) =

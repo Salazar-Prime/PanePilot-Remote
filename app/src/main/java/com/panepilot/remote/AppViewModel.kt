@@ -74,6 +74,7 @@ data class AppUiState(
     val paneTitle: String = "",
     val composer: String = "",
     val isBusy: Boolean = false,
+    val isReconnecting: Boolean = false,
     val isSending: Boolean = false,
     val attentionNotificationTerminalIds: Set<String> = emptySet(),
     val unreadAttentionTerminalIds: Set<String> = emptySet(),
@@ -146,9 +147,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionPolling: Job? = null
     private var fileLoading: Job? = null
     private var actionLoading: Job? = null
+    private var reconnectJob: Job? = null
     private var consoleFailureReported = false
     private var lastSessionStates: Map<String, SessionState> = emptyMap()
     private var pendingAttentionTarget: Pair<String, String>? = null
+    private var pendingReconnectSessionName: String? = null
+    private val reconnectFailures = mutableMapOf<String, Int>()
+    private val reconnectNotBefore = mutableMapOf<String, Long>()
 
     init {
         restoreBackgroundConnection()
@@ -380,6 +385,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 paneTitle = "",
                 composer = "",
                 isBusy = false,
+                isReconnecting = false,
                 isSending = false,
                 attentionNotificationTerminalIds = emptySet(),
                 unreadAttentionTerminalIds = emptySet(),
@@ -407,7 +413,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshSessions() {
         val connection = activeConnection ?: return
-        if (!connection.ssh.isConnected || _state.value.isBusy) return
+        if (!connection.ssh.isConnected) {
+            reconnect()
+            return
+        }
+        if (_state.value.isBusy) return
         viewModelScope.launch {
             _state.update { it.copy(isBusy = true, error = null) }
             runCatching {
@@ -425,23 +435,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun openConsole(sessionName: String) {
         val selected = _state.value.sessions.firstOrNull { it.name == sessionName } ?: return
         if (activeConnection?.ssh?.isConnected != true) {
-            _state.update { it.copy(connectedProfileIds = connectedProfileIds()) }
-            showError("SSH is offline. Reconnect to open this session.")
+            pendingReconnectSessionName = sessionName
+            _state.update {
+                it.copy(
+                    selectedSession = selected,
+                    screen = AppScreen.Console(sessionName),
+                    connectedProfileIds = connectedProfileIds()
+                )
+            }
+            reconnect()
             return
         }
+        selectConsole(selected)
+    }
+
+    fun reconnect() {
+        val profileId = activeProfileId ?: return
+        startReconnect(profileId, userInitiated = true)
+    }
+
+    private fun selectConsole(selected: PanePilotSession) {
         markTerminalRead(selected.terminalId)
         markTerminalInteraction(selected.terminalId)
+        if (selected.isActiveNavigationSession) {
+            _state.value.connectedProfile?.id?.let { profileId ->
+                terminalPreferences.setLastSelectedTerminalId(profileId, selected.terminalId)
+            }
+        }
         _state.update {
             it.copy(
                 selectedSession = selected,
-                screen = AppScreen.Console(sessionName),
+                screen = AppScreen.Console(selected.name),
                 transcript = "",
                 paneTitle = selected.paneTitle,
                 composer = "",
                 error = null
             )
         }
-        startConsolePolling(sessionName)
+        startConsolePolling(selected.name)
     }
 
     fun openAttentionTarget(profileId: String, terminalId: String) {
@@ -770,8 +801,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess {
                 if (activeProfileId != connection.profile.id) return@onSuccess
                 markTerminalInteraction(
-                    current.selectedSession.terminalId,
-                    includeActivity = true
+                    current.selectedSession.terminalId
                 )
                 _state.update { it.copy(composer = "", isSending = false) }
                 delay(250)
@@ -792,7 +822,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.IO) { connection.tmux.sendKey(sessionName, key) }
             }.onSuccess {
                 if (activeProfileId != connection.profile.id) return@onSuccess
-                markTerminalInteraction(selected.terminalId, includeActivity = true)
+                markTerminalInteraction(selected.terminalId)
                 delay(120)
                 refreshConsole(sessionName, reportError = true)
             }.onFailure(::finishWithError)
@@ -942,12 +972,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         activeProfileId = connection.profile.id
         backgroundMonitorStore.addProfile(connection.profile.id)
         lastSessionStates = connection.sessions.associate { it.terminalId to it.state }
+        val restoredSession = terminalPreferences
+            .lastSelectedTerminalId(connection.profile.id)
+            ?.let { terminalId ->
+                connection.sessions.firstOrNull {
+                    it.terminalId == terminalId && it.isActiveNavigationSession
+                }
+            }
         _state.update {
             it.copy(
                 connectedProfile = connection.profile,
                 connectedProfileIds = connectedProfileIds(),
                 sessions = connection.sessions,
-                selectedSession = null,
+                selectedSession = restoredSession,
                 transcript = "",
                 paneTitle = "",
                 composer = "",
@@ -983,12 +1020,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 projectActions = emptyList(),
                 isLoadingActions = false,
                 runningActionId = null,
-                screen = AppScreen.Sessions,
+                isReconnecting = false,
+                screen = restoredSession?.let { AppScreen.Console(it.name) }
+                    ?: AppScreen.Sessions,
                 notice = null,
                 error = null
             )
         }
         startSessionPolling()
+        restoredSession?.let { startConsolePolling(it.name) }
         completePendingAttentionTarget(connection)
     }
 
@@ -1099,15 +1139,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun markTerminalInteraction(
         terminalId: String,
-        includeActivity: Boolean = false,
         atMillis: Long = System.currentTimeMillis()
     ) {
         if (terminalId.isBlank()) return
         val profileId = _state.value.connectedProfile?.id ?: return
         terminalPreferences.markInteraction(profileId, terminalId, atMillis)
-        if (includeActivity) {
-            terminalPreferences.markActivity(profileId, terminalId, atMillis)
-        }
         val terminalIds = _state.value.sessions.map { it.terminalId }
         _state.update {
             it.copy(
@@ -1183,6 +1219,173 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun startReconnect(profileId: String, userInitiated: Boolean) {
+        if (activeProfileId != profileId || reconnectJob?.isActive == true) return
+        val connection = connections[profileId] ?: return
+        if (connection.ssh.isConnected) {
+            if (userInitiated) refreshSessions()
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!userInitiated && now < reconnectNotBefore.getOrDefault(profileId, 0L)) return
+
+        reconnectJob = viewModelScope.launch {
+            _state.update { it.copy(isReconnecting = true) }
+            runCatching {
+                withContext(Dispatchers.IO) { recoveredConnection(profileId, connection) }
+            }.onSuccess { recovered ->
+                val prior = connections.put(profileId, recovered)
+                if (
+                    prior != null &&
+                    prior.ssh !== recovered.ssh &&
+                    prior.ownsTransport
+                ) {
+                    prior.ssh.disconnect()
+                }
+                reconnectFailures.remove(profileId)
+                reconnectNotBefore.remove(profileId)
+                if (recovered.secret.hasCredentialsFor(recovered.profile)) {
+                    AgentMonitorService.start(
+                        getApplication(),
+                        recovered.profile.id,
+                        recovered.secret
+                    )
+                }
+                if (activeProfileId == profileId) {
+                    val current = _state.value
+                    val requestedName = pendingReconnectSessionName
+                    val selected = requestedName?.let { name ->
+                        recovered.sessions.firstOrNull { it.name == name }
+                    } ?: current.selectedSession?.let { priorSession ->
+                        recovered.sessions.firstOrNull {
+                            it.terminalId == priorSession.terminalId
+                        }
+                    }
+                    pendingReconnectSessionName = null
+                    val nextScreen = when {
+                        current.screen == AppScreen.Servers -> AppScreen.Servers
+                        selected != null && current.screen is AppScreen.Console ->
+                            AppScreen.Console(selected.name)
+                        selected != null && current.screen is AppScreen.Files -> current.screen
+                        selected != null && current.screen is AppScreen.Actions -> current.screen
+                        else -> AppScreen.Sessions
+                    }
+                    lastSessionStates = recovered.sessions.associate {
+                        it.terminalId to it.state
+                    }
+                    _state.update {
+                        it.copy(
+                            connectedProfile = recovered.profile,
+                            connectedProfileIds = connectedProfileIds(),
+                            sessions = recovered.sessions,
+                            selectedSession = selected,
+                            transcript = if (nextScreen is AppScreen.Console) "" else it.transcript,
+                            paneTitle = selected?.paneTitle.orEmpty(),
+                            isReconnecting = false,
+                            isSending = false,
+                            screen = nextScreen,
+                            attentionNotificationTerminalIds =
+                                attentionPreferences.enabledTerminalIds(profileId),
+                            unreadAttentionTerminalIds =
+                                attentionState.unreadTerminalIds(profileId),
+                            pinnedTerminalIds =
+                                terminalPreferences.pinnedTerminalIds(profileId),
+                            terminalInteractionTimes = terminalPreferences.interactionTimes(
+                                profileId,
+                                recovered.sessions.map { session -> session.terminalId }
+                            ),
+                            terminalActivityTimes = terminalPreferences.activityTimes(
+                                profileId,
+                                recovered.sessions.map { session -> session.terminalId }
+                            ),
+                            error = null,
+                            notice = if (userInitiated) "SSH connection restored." else it.notice
+                        )
+                    }
+                    startSessionPolling()
+                    if (nextScreen is AppScreen.Console && selected != null) {
+                        startConsolePolling(selected.name)
+                    }
+                    completePendingAttentionTarget(recovered)
+                } else {
+                    _state.update {
+                        it.copy(
+                            connectedProfileIds = connectedProfileIds(),
+                            isReconnecting = false
+                        )
+                    }
+                }
+            }.onFailure { error ->
+                val failures = (reconnectFailures[profileId] ?: 0) + 1
+                reconnectFailures[profileId] = failures
+                val backoff = (2_000L * (1L shl (failures - 1).coerceAtMost(5)))
+                    .coerceAtMost(60_000L)
+                reconnectNotBefore[profileId] = System.currentTimeMillis() + backoff
+                _state.update {
+                    it.copy(
+                        connectedProfileIds = connectedProfileIds(),
+                        isReconnecting = false,
+                        error = if (userInitiated) messageFor(error) else it.error
+                    )
+                }
+            }
+        }
+    }
+
+    private fun recoveredConnection(
+        profileId: String,
+        prior: LiveConnection
+    ): LiveConnection {
+        val profile = profile(profileId)
+            ?: throw IllegalStateException("This SSH server profile no longer exists.")
+        val warmSsh = AgentMonitorService.connectedSshFor(profileId)
+        if (warmSsh != null) {
+            val warmTmux = TmuxGateway(warmSsh)
+            return LiveConnection(
+                profile = profile,
+                ssh = warmSsh,
+                tmux = warmTmux,
+                remoteFiles = RemoteFileGateway(warmSsh),
+                actions = ProjectActionGateway(warmSsh, warmTmux),
+                secret = AgentMonitorService.connectionSecretFor(profileId)
+                    ?: prior.secret,
+                sessions = warmTmux.listSessions(),
+                ownsTransport = false
+            )
+        }
+
+        val secret = AgentMonitorService.connectionSecretFor(profileId)
+            ?.takeIf { it.hasCredentialsFor(profile) }
+            ?: prior.secret.takeIf { it.hasCredentialsFor(profile) }
+            ?: when (profile.authMode) {
+                AuthMode.PASSWORD -> credentialStore.password(profileId)?.let {
+                    ConnectionSecret(password = it)
+                }
+                AuthMode.PRIVATE_KEY -> ConnectionSecret()
+            }
+            ?: throw IllegalStateException(
+                "Saved credentials are unavailable. Open Servers and reconnect once."
+            )
+        val ssh = SshConnection(getApplication(), profileStore, ::awaitHostKeyDecision)
+        try {
+            ssh.connect(profile, secret)
+            val tmux = TmuxGateway(ssh)
+            return LiveConnection(
+                profile = profile,
+                ssh = ssh,
+                tmux = tmux,
+                remoteFiles = RemoteFileGateway(ssh),
+                actions = ProjectActionGateway(ssh, tmux),
+                secret = secret,
+                sessions = tmux.listSessions(),
+                ownsTransport = true
+            )
+        } catch (error: Exception) {
+            ssh.disconnect()
+            throw error
+        }
+    }
+
     private fun startSessionPolling() {
         sessionPolling?.cancel()
         val profileId = activeProfileId ?: return
@@ -1211,7 +1414,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         _state.update { state ->
                             state.copy(connectedProfileIds = connectedProfileIds())
                         }
+                        startReconnect(profileId, userInitiated = false)
                     }
+                } else if (!connection.ssh.isConnected) {
+                    startReconnect(profileId, userInitiated = false)
                 }
                 delay(SESSION_POLL_INTERVAL_MS)
             }
@@ -1256,15 +1462,25 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         lastSessionStates = sessions.associate { it.terminalId to it.state }
         activeConnection?.sessions = sessions
         _state.update { state ->
-            val selected = state.selectedSession?.let { selectedSession ->
+            val liveSelected = state.selectedSession?.let { selectedSession ->
                 sessions.firstOrNull { it.terminalId == selectedSession.terminalId }
-                    ?: selectedSession
+            }
+            val selectedSessionMissing = state.selectedSession != null && liveSelected == null
+            val selected = liveSelected ?: state.selectedSession.takeIf {
+                state.screen is AppScreen.Files || state.screen is AppScreen.Actions
             }
             state.copy(
                 sessions = sessions,
                 connectedProfileIds = connectedProfileIds(),
                 selectedSession = selected,
-                paneTitle = selected?.paneTitle ?: state.paneTitle,
+                screen = if (selectedSessionMissing && state.screen is AppScreen.Console) {
+                    AppScreen.Sessions
+                } else {
+                    state.screen
+                },
+                transcript = if (selectedSessionMissing) "" else state.transcript,
+                paneTitle = selected?.paneTitle
+                    ?: state.paneTitle.takeUnless { selectedSessionMissing }.orEmpty(),
                 attentionNotificationTerminalIds = profile?.let {
                     attentionPreferences.enabledTerminalIds(it.id)
                 }.orEmpty(),
@@ -1337,6 +1553,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }.onFailure { error ->
             _state.update { it.copy(connectedProfileIds = connectedProfileIds()) }
+            activeProfileId?.let { startReconnect(it, userInitiated = false) }
             if (reportError && !consoleFailureReported) {
                 consoleFailureReported = true
                 showError(messageFor(error))
@@ -1428,3 +1645,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         const val SESSION_POLL_INTERVAL_MS = 6_000L
     }
 }
+
+private fun ConnectionSecret.hasCredentialsFor(profile: ServerProfile): Boolean =
+    profile.authMode == AuthMode.PRIVATE_KEY || password.isNotBlank()

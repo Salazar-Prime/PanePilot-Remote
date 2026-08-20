@@ -130,25 +130,25 @@ class SshConnection(
     ): CommandResult {
         val active = session?.takeIf { it.isConnected }
             ?: throw IllegalStateException("The SSH connection is offline.")
-        val channel = active.openChannel("exec") as ChannelExec
-        val stdout = channel.inputStream
         val stderr = ByteArrayOutputStream()
         val stdoutBytes = ByteArrayOutputStream()
-
-        channel.setCommand(command)
-        channel.setPty(false)
-        channel.setErrStream(stderr)
-        if (stdin != null) {
-            channel.setInputStream(ByteArrayInputStream(stdin))
-        } else {
-            channel.setInputStream(null)
-        }
-
         val startedAt = SystemClock.elapsedRealtime()
+        var channel: ChannelExec? = null
         try {
-            channel.connect(CONNECT_TIMEOUT_MS)
+            val nextChannel = active.openChannel("exec") as ChannelExec
+            channel = nextChannel
+            val stdout = nextChannel.inputStream
+            nextChannel.setCommand(command)
+            nextChannel.setPty(false)
+            nextChannel.setErrStream(stderr)
+            if (stdin != null) {
+                nextChannel.setInputStream(ByteArrayInputStream(stdin))
+            } else {
+                nextChannel.setInputStream(null)
+            }
+            nextChannel.connect(CONNECT_TIMEOUT_MS)
             val buffer = ByteArray(8_192)
-            while (!channel.isClosed || stdout.available() > 0) {
+            while (!nextChannel.isClosed || stdout.available() > 0) {
                 while (stdout.available() > 0) {
                     val count = stdout.read(buffer, 0, minOf(buffer.size, stdout.available()))
                     if (count < 0) break
@@ -163,18 +163,18 @@ class SshConnection(
                 if (SystemClock.elapsedRealtime() - startedAt > timeoutMs) {
                     throw IllegalStateException("The remote command timed out.")
                 }
-                if (!channel.isClosed) Thread.sleep(20)
+                if (!nextChannel.isClosed) Thread.sleep(20)
             }
             return CommandResult(
                 stdout = stdoutBytes.toString(Charsets.UTF_8.name()),
                 stderr = stderr.toString(Charsets.UTF_8.name()),
-                exitCode = channel.exitStatus
+                exitCode = nextChannel.exitStatus
             )
         } catch (error: JSchException) {
             disconnect()
             throw connectionError(error)
         } finally {
-            channel.disconnect()
+            channel?.disconnect()
         }
     }
 
@@ -182,10 +182,12 @@ class SshConnection(
     internal fun <T> withSftp(block: (ChannelSftp) -> T): T {
         val active = session?.takeIf { it.isConnected }
             ?: throw IllegalStateException("The SSH connection is offline.")
-        val channel = active.openChannel("sftp") as ChannelSftp
+        var channel: ChannelSftp? = null
         try {
-            channel.connect(CONNECT_TIMEOUT_MS)
-            return block(channel)
+            val nextChannel = active.openChannel("sftp") as ChannelSftp
+            channel = nextChannel
+            nextChannel.connect(CONNECT_TIMEOUT_MS)
+            return block(nextChannel)
         } catch (error: JSchException) {
             disconnect()
             throw connectionError(error)
@@ -196,7 +198,7 @@ class SshConnection(
                 error
             )
         } finally {
-            channel.disconnect()
+            channel?.disconnect()
         }
     }
 

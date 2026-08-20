@@ -8,7 +8,7 @@ import org.junit.Test
 
 class SessionGroupsTest {
     @Test
-    fun unreadAttentionStaysAheadOfPinnedAndSortedSessions() {
+    fun activitySortKeepsPinnedAheadOfAttentionAndSortedSessions() {
         val sessions = listOf(
             session("Zulu", "/work/a", SessionState.IDLE),
             session("Ready response", "/work/b", SessionState.READY),
@@ -20,22 +20,22 @@ class SessionGroupsTest {
             sessions = sessions,
             pinnedTerminalIds = setOf("terminal-Pinned terminal"),
             unreadAttentionTerminalIds = setOf("terminal-Ready response"),
-            sortMode = TerminalSortMode.NAME
+            sortMode = TerminalSortMode.ACTIVITY
         )
 
         assertEquals(
             listOf(
-                SessionGroupKind.ATTENTION,
                 SessionGroupKind.PINNED,
+                SessionGroupKind.ATTENTION,
                 SessionGroupKind.TERMINALS
             ),
             groups.map { it.kind }
         )
+        assertEquals(listOf("Pinned terminal"), groups[0].sessions.map { it.name })
         assertEquals(
             listOf("Direct question", "Ready response"),
-            groups[0].sessions.map { it.name }
+            groups[1].sessions.map { it.name }
         )
-        assertEquals(listOf("Pinned terminal"), groups[1].sessions.map { it.name })
         assertEquals(listOf("Zulu"), groups[2].sessions.map { it.name })
     }
 
@@ -88,42 +88,94 @@ class SessionGroupsTest {
     }
 
     @Test
-    fun activitySortKeepsReadySessionAtItsStickyActivityPosition() {
+    fun activitySortPrioritizesWorkingBeforeReadyThenUsesLatestActivity() {
         val groups = sessionGroups(
             sessions = listOf(
-                session("Ready", "/work/a", SessionState.READY),
-                session("Working", "/work/a", SessionState.RUNNING)
+                session("Older ready", "/work/a", SessionState.READY),
+                session("Working", "/work/a", SessionState.RUNNING),
+                session("Latest ready", "/work/a", SessionState.READY),
+                session("Idle", "/work/a", SessionState.IDLE)
             ),
             pinnedTerminalIds = emptySet(),
             unreadAttentionTerminalIds = emptySet(),
             sortMode = TerminalSortMode.ACTIVITY,
             activityTimes = mapOf(
-                "terminal-Ready" to 200L,
-                "terminal-Working" to 100L
+                "terminal-Older ready" to 200L,
+                "terminal-Working" to 100L,
+                "terminal-Latest ready" to 300L,
+                "terminal-Idle" to 400L
             )
         )
 
-        assertEquals(listOf("Ready", "Working"), groups.single().sessions.map { it.name })
+        assertEquals(
+            listOf("Working", "Latest ready", "Older ready", "Idle"),
+            groups.single().sessions.map { it.name }
+        )
+    }
+
+    @Test
+    fun recentSortIsNotOverriddenByUnreadAttention() {
+        val groups = sessionGroups(
+            sessions = listOf(
+                session("Recently opened", "/work/a", SessionState.IDLE),
+                session("Unread ready", "/work/a", SessionState.READY)
+            ),
+            pinnedTerminalIds = emptySet(),
+            unreadAttentionTerminalIds = setOf("terminal-Unread ready"),
+            sortMode = TerminalSortMode.NEWEST,
+            interactionTimes = mapOf(
+                "terminal-Recently opened" to 300L,
+                "terminal-Unread ready" to 200L
+            )
+        )
+
+        assertEquals(
+            listOf("Recently opened", "Unread ready"),
+            groups.single().sessions.map { it.name }
+        )
+    }
+
+    @Test
+    fun navigationListExcludesStoppedAndCapabilityOwnedSessions() {
+        val groups = sessionGroups(
+            sessions = listOf(
+                session("Ordinary", "/work/a", SessionState.IDLE),
+                session("LaTeX", "/work/a", SessionState.RUNNING, kind = "latex-chat"),
+                session("Action", "/work/a", SessionState.LIVE, kind = "action"),
+                session("Project Q&A", "/work/a", SessionState.IDLE, kind = "project-qna"),
+                session("Stopped", "/work/a", SessionState.STOPPED, paneDead = true)
+            ),
+            pinnedTerminalIds = setOf("terminal-Action"),
+            unreadAttentionTerminalIds = setOf("terminal-Project Q&A"),
+            sortMode = TerminalSortMode.NAME
+        )
+
+        assertEquals(
+            listOf("LaTeX", "Ordinary"),
+            groups.single().sessions.map { it.name }
+        )
     }
 
     private fun session(
         name: String,
         projectPath: String,
         state: SessionState,
-        createdAt: String = "2026-07-01T00:00:00Z"
+        createdAt: String = "2026-07-01T00:00:00Z",
+        kind: String = "terminal",
+        paneDead: Boolean = false
     ) = PanePilotSession(
         name = name,
         attachedClients = 0,
         paneTitle = "",
         currentCommand = "",
-        paneDead = false,
+        paneDead = paneDead,
         terminalId = "terminal-$name",
         projectId = "project-$projectPath",
         projectPath = projectPath,
         profile = "codex",
         createdAt = createdAt,
         dangerousMode = false,
-        sessionKind = "terminal",
+        sessionKind = kind,
         actionName = null,
         latexSectionTitle = null,
         state = state

@@ -103,6 +103,9 @@ data class PanePilotSession(
     val actionCommand: String? = null,
     val actionExitCode: Int? = null
 ) {
+    val isActiveNavigationSession: Boolean
+        get() = !paneDead && sessionKind in setOf("terminal", "latex-chat")
+
     val projectName: String
         get() = projectPath.trimEnd('/').substringAfterLast('/').ifBlank { projectPath }
 

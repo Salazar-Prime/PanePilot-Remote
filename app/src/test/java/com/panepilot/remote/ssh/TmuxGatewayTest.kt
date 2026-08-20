@@ -124,6 +124,11 @@ class TmuxGatewayTest {
     }
 
     @Test
+    fun `exact tmux targets include a pane separator for names with spaces`() {
+        assertEquals("=Action · Run tests:", TmuxGateway.exactSessionTarget("Action · Run tests"))
+    }
+
+    @Test
     fun `mobile terminal buttons map only to exact tmux key names`() {
         assertEquals("C-m", TmuxGateway.tmuxKeyName(TerminalKey.ENTER))
         assertEquals("Escape", TmuxGateway.tmuxKeyName(TerminalKey.ESCAPE))
@@ -153,6 +158,7 @@ class TmuxGatewayTest {
         assertTrue(command.contains("@panepilot_action_id"))
         assertTrue(command.contains("remain-on-exit on"))
         assertTrue(command.contains("( npm test"))
+        assertTrue(command.contains("while :; do sleep 3600; done"))
         assertTrue(command.indexOf("@panepilot_managed") < command.indexOf("( npm test"))
     }
 }

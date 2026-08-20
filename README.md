@@ -16,6 +16,8 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Optional password storage encrypted with Android Keystore
 - SSH host-key verification and saved `known_hosts`
 - PanePilot session discovery with activity, name, recent-use, and project sorting
+- An active-terminal switcher that omits stopped panes and capability-owned Action,
+  Project Q&A, and Quick Chat sessions
 - Persisted per-server terminal pinning for quick access
 - A compact hideable side pane with header-based history and sorting controls
 - Optional emoji identities for SSH server sessions, configured when editing a server
@@ -27,12 +29,13 @@ SQLite database. Tmux remains authoritative for live-session presence.
 - Downloads for every file type through Android's system file picker
 - Project Actions loaded from `.panepilot/actions.json` and run in tagged tmux sessions
 - Per-terminal alerts when a Codex or Claude session needs input or finishes a response
-- A dedicated unread attention queue that stays above pinned and sorted terminals
+- Activity sorting that promotes attention, Working, and Ready terminals in that order
 - Separate Android categories and notification groups for connection status, agent
   completions, and needs-input alerts
 - Exact-session notification links and a persistent in-app history of the last 200
   agent alerts sent on the phone
 - Foreground SSH/tmux monitoring that continues after leaving or swiping away the app
+- Automatic in-place SSH recovery with an explicit Reconnect control on the current console
 - Clickable HTTP(S) links and project file paths in ANSI-colored terminal output
 
 The app is a focused monitor and message composer, not a full terminal emulator. It
@@ -119,8 +122,8 @@ and allow installation from that file source when Android asks.
    switch between them without disconnecting the others. Edit a server to assign it
    an emoji identity.
 9. Tap a terminal's bell to enable or disable attention alerts. A terminal that needs
-   input or finishes a response moves into the **Needs attention** section at the top
-   of the list until you open it. Open **History** to review alerts sent since version
+   input or finishes a response is promoted when sorting by **Activity** until you
+   open it. Open **History** to review alerts sent since version
    0.6.0; tapping a history entry opens its exact server and terminal. The persistent
    monitor keeps every connected server online and stops an individual connection
    only when you explicitly disconnect it. On Android 13 and newer, approve the
@@ -129,8 +132,9 @@ and allow installation from that file source when Android asks.
     open its folder in Remote Files; supported files open directly in the viewer.
 11. Pin frequently used terminals with the top button in each card and control alerts
     with the bell below it. Use the sort icon for **Activity**, **Name**, **Recent**, or
-    **Project**. Recent follows taps and input made in this Android app; Activity keeps
-    the latest output/state transition at the top, including after Working becomes Ready.
+    **Project**. Recent follows the terminals most recently selected in this Android
+    app. Activity orders terminals that need attention first, followed by Working,
+    Ready, Idle, and other live sessions; the latest observed activity breaks ties.
 
 If a legitimate server is rebuilt and its host key changes, edit that server and use
 **Forget saved host key** only after independently verifying the new fingerprint.
@@ -164,13 +168,17 @@ If a legitimate server is rebuilt and its host key changes, edit that server and
   included in this history.
 - Pressing Android Back from the session list backgrounds PanePilot instead of
   disconnecting. If Android recreates the activity while the service remains active,
-  PanePilot restores the monitored SSH connection automatically.
+  PanePilot restores the monitored SSH connection automatically. It also remembers
+  the last ordinary terminal selected for each server and returns to it after a
+  process restart when reusable credentials are available.
 - The monitor reconnects with bounded backoff after network loss. Remembered passwords
   can survive a process restart because they are encrypted with Android Keystore.
   Unremembered passwords and private-key passphrases remain only in service memory and
   require reopening PanePilot if Android kills the service process.
 - Last-seen agent states are saved locally, so a brief SSH reconnect does not lose the
   `Working` to `Ready` transition used for response-complete alerts.
-- Android force-stop always disables foreground monitoring until PanePilot is opened
-  and connected again. Monitoring does not start automatically after a phone reboot.
+- Android force-stop always disables foreground monitoring until PanePilot is opened.
+  On the next launch, a remembered password or imported unencrypted private key lets
+  PanePilot reconnect automatically. Monitoring does not start after a phone reboot
+  until the app is opened.
 - Leaving the app does not stop the remote tmux session.

@@ -27,36 +27,33 @@ internal fun sessionGroups(
     interactionTimes: Map<String, Long> = emptyMap(),
     activityTimes: Map<String, Long> = emptyMap()
 ): List<SessionGroup> {
-    val attentionIds = sessions
+    val activeSessions = sessions.filter { it.isActiveNavigationSession }
+    val attentionIds = activeSessions
         .filter {
             it.state == SessionState.NEEDS_INPUT ||
                 it.terminalId in unreadAttentionTerminalIds
         }
         .mapTo(linkedSetOf()) { it.terminalId }
-    val attention = sessions
-        .filter { it.terminalId in attentionIds }
-        .sortedWith(sessionComparator(sortMode, interactionTimes, activityTimes))
-    val pinned = sessions
-        .filter {
-            it.terminalId in pinnedTerminalIds &&
-                it.terminalId !in attentionIds
-        }
-        .sortedWith(sessionComparator(sortMode, interactionTimes, activityTimes))
-    val promotedIds = attentionIds + pinned.map { it.terminalId }
-    val remaining = sessions.filterNot { it.terminalId in promotedIds }
+    val comparator = sessionComparator(
+        sortMode,
+        interactionTimes,
+        activityTimes,
+        attentionIds
+    )
+    val pinned = activeSessions
+        .filter { it.terminalId in pinnedTerminalIds }
+        .sortedWith(comparator)
+    val unpinned = activeSessions.filterNot { it.terminalId in pinnedTerminalIds }
+    val attention = if (sortMode == TerminalSortMode.ACTIVITY) {
+        unpinned.filter { it.terminalId in attentionIds }.sortedWith(comparator)
+    } else {
+        emptyList()
+    }
+    val promotedIds = pinned.mapTo(mutableSetOf()) { it.terminalId } +
+        attention.map { it.terminalId }
+    val remaining = activeSessions.filterNot { it.terminalId in promotedIds }
 
     return buildList {
-        if (attention.isNotEmpty()) {
-            add(
-                SessionGroup(
-                    key = "attention",
-                    title = "Needs attention",
-                    subtitle = "UNREAD AGENT ALERTS",
-                    kind = SessionGroupKind.ATTENTION,
-                    sessions = attention
-                )
-            )
-        }
         if (pinned.isNotEmpty()) {
             add(
                 SessionGroup(
@@ -65,6 +62,17 @@ internal fun sessionGroups(
                     subtitle = "QUICK ACCESS",
                     kind = SessionGroupKind.PINNED,
                     sessions = pinned
+                )
+            )
+        }
+        if (attention.isNotEmpty()) {
+            add(
+                SessionGroup(
+                    key = "attention",
+                    title = "Needs attention",
+                    subtitle = "UNREAD AGENT ALERTS",
+                    kind = SessionGroupKind.ATTENTION,
+                    sessions = attention
                 )
             )
         }
@@ -86,7 +94,8 @@ internal fun sessionGroups(
                                 sessionComparator(
                                     TerminalSortMode.NAME,
                                     interactionTimes,
-                                    activityTimes
+                                    activityTimes,
+                                    attentionIds
                                 )
                             )
                         )
@@ -100,7 +109,7 @@ internal fun sessionGroups(
                     subtitle = "SORTED BY ${sortMode.label.uppercase()}",
                     kind = SessionGroupKind.TERMINALS,
                     sessions = remaining.sortedWith(
-                        sessionComparator(sortMode, interactionTimes, activityTimes)
+                        comparator
                     )
                 )
             )
@@ -111,10 +120,13 @@ internal fun sessionGroups(
 private fun sessionComparator(
     sortMode: TerminalSortMode,
     interactionTimes: Map<String, Long>,
-    activityTimes: Map<String, Long>
+    activityTimes: Map<String, Long>,
+    attentionIds: Set<String>
 ): Comparator<PanePilotSession> =
     when (sortMode) {
-        TerminalSortMode.ACTIVITY -> compareByDescending<PanePilotSession> {
+        TerminalSortMode.ACTIVITY -> compareBy<PanePilotSession> {
+            activityPriority(it, attentionIds)
+        }.thenByDescending {
             activityTimes[it.terminalId] ?: createdAtMillis(it.createdAt)
         }.thenBy { it.name.lowercase() }
 
@@ -128,6 +140,18 @@ private fun sessionComparator(
             { it.name.lowercase() }
         )
     }
+
+private fun activityPriority(
+    session: PanePilotSession,
+    attentionIds: Set<String>
+): Int = when {
+    session.terminalId in attentionIds -> 0
+    session.state == SessionState.RUNNING -> 1
+    session.state == SessionState.READY -> 2
+    session.state == SessionState.IDLE -> 3
+    session.state == SessionState.LIVE -> 4
+    else -> 5
+}
 
 private fun createdAtMillis(value: String): Long =
     runCatching { java.time.Instant.parse(value).toEpochMilli() }.getOrDefault(0L)

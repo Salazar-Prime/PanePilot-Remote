@@ -698,6 +698,7 @@ fun CredentialsScreen(
 fun SessionWorkspaceScreen(
     profile: ServerProfile?,
     connectionOnline: Boolean,
+    isReconnecting: Boolean,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     transcript: String,
@@ -706,6 +707,7 @@ fun SessionWorkspaceScreen(
     isRefreshing: Boolean,
     isSending: Boolean,
     onRefresh: () -> Unit,
+    onReconnect: () -> Unit,
     onShowServers: () -> Unit,
     onDisconnect: () -> Unit,
     onOpenSession: (String) -> Unit,
@@ -752,10 +754,12 @@ fun SessionWorkspaceScreen(
                 SessionDrawerContent(
                     profile = profile,
                     connectionOnline = connectionOnline,
+                    isReconnecting = isReconnecting,
                     sessions = sessions,
                     selectedSession = selectedSession,
                     isRefreshing = isRefreshing,
                     onRefresh = onRefresh,
+                    onReconnect = onReconnect,
                     onShowServers = onShowServers,
                     onDisconnect = onDisconnect,
                     notificationTerminalIds = notificationTerminalIds,
@@ -787,11 +791,14 @@ fun SessionWorkspaceScreen(
         } else {
             SessionConsoleScreen(
                 session = selectedSession,
+                connectionOnline = connectionOnline,
+                isReconnecting = isReconnecting,
                 transcript = transcript,
                 paneTitle = paneTitle,
                 composer = composer,
                 isSending = isSending,
                 onShowSessions = { scope.launch { drawerState.open() } },
+                onReconnect = onReconnect,
                 onBrowseFiles = onBrowseFiles,
                 onRunActions = onRunActions,
                 onComposerChange = onComposerChange,
@@ -820,10 +827,12 @@ fun SessionWorkspaceScreen(
 private fun SessionDrawerContent(
     profile: ServerProfile?,
     connectionOnline: Boolean,
+    isReconnecting: Boolean,
     sessions: List<PanePilotSession>,
     selectedSession: PanePilotSession?,
     isRefreshing: Boolean,
     onRefresh: () -> Unit,
+    onReconnect: () -> Unit,
     onShowServers: () -> Unit,
     onDisconnect: () -> Unit,
     notificationTerminalIds: Set<String>,
@@ -919,7 +928,15 @@ private fun SessionDrawerContent(
                 }
             }
         )
-        if (sessions.isEmpty() && !isRefreshing) {
+        if (!connectionOnline) {
+            OfflineConnectionBanner(
+                isReconnecting = isReconnecting,
+                onReconnect = onReconnect,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+            )
+        }
+        val activeSessions = sessions.filter { it.isActiveNavigationSession }
+        if (activeSessions.isEmpty() && !isRefreshing) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -928,13 +945,13 @@ private fun SessionDrawerContent(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        "No live PanePilot sessions",
+                        "No active terminal sessions",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Start a tmux-backed session from PanePilot desktop, then refresh.",
+                        "Action and capability sessions stay in their project tools. Start an ordinary tmux terminal from PanePilot desktop, then refresh.",
                         color = Muted,
                         style = MaterialTheme.typography.bodyMedium
                     )
@@ -946,7 +963,7 @@ private fun SessionDrawerContent(
                 terminalListState.scrollToItem(0)
             }
             val groups = sessionGroups(
-                sessions = sessions,
+                sessions = activeSessions,
                 pinnedTerminalIds = pinnedTerminalIds,
                 unreadAttentionTerminalIds = unreadAttentionTerminalIds,
                 sortMode = terminalSortMode,
@@ -1372,11 +1389,14 @@ private fun SessionCard(
 @Composable
 fun SessionConsoleScreen(
     session: PanePilotSession?,
+    connectionOnline: Boolean,
+    isReconnecting: Boolean,
     transcript: String,
     paneTitle: String,
     composer: String,
     isSending: Boolean,
     onShowSessions: () -> Unit,
+    onReconnect: () -> Unit,
     onBrowseFiles: () -> Unit,
     onRunActions: () -> Unit,
     onComposerChange: (String) -> Unit,
@@ -1407,6 +1427,13 @@ fun SessionConsoleScreen(
             onBrowseFiles = onBrowseFiles,
             onRunActions = onRunActions
         )
+        if (!connectionOnline) {
+            OfflineConnectionBanner(
+                isReconnecting = isReconnecting,
+                onReconnect = onReconnect,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1435,7 +1462,7 @@ fun SessionConsoleScreen(
             )
         }
         TerminalKeyBar(
-            enabled = session?.paneDead != true,
+            enabled = connectionOnline && session?.paneDead != true,
             onTerminalKey = onTerminalKey
         )
         Box(
@@ -1503,7 +1530,7 @@ fun SessionConsoleScreen(
                 OutlinedTextField(
                     value = composer,
                     onValueChange = onComposerChange,
-                    enabled = session?.paneDead != true,
+                    enabled = connectionOnline && session?.paneDead != true,
                     placeholder = {
                         Text(
                             if (session?.profile in listOf("codex", "claude")) {
@@ -1520,7 +1547,8 @@ fun SessionConsoleScreen(
                 Spacer(Modifier.width(10.dp))
                 FilledIconButton(
                     onClick = onSend,
-                    enabled = composer.isNotBlank() && !isSending && session?.paneDead != true,
+                    enabled = connectionOnline && composer.isNotBlank() &&
+                        !isSending && session?.paneDead != true,
                     modifier = Modifier.size(52.dp)
                 ) {
                     if (isSending) {
@@ -1532,6 +1560,63 @@ fun SessionConsoleScreen(
                     } else {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineConnectionBanner(
+    isReconnecting: Boolean,
+    onReconnect: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        color = Attention.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, Attention.copy(alpha = 0.42f)),
+        shape = RoundedCornerShape(12.dp),
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    if (isReconnecting) "Reconnecting to SSH…" else "SSH connection lost",
+                    color = Attention,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    "This screen will refresh in place when the server returns.",
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.width(10.dp))
+            OutlinedButton(
+                onClick = onReconnect,
+                enabled = !isReconnecting,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                    horizontal = 12.dp,
+                    vertical = 6.dp
+                )
+            ) {
+                if (isReconnecting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(15.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        Icons.Default.Refresh,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text("Reconnect")
                 }
             }
         }
@@ -2028,7 +2113,9 @@ fun ProjectActionsScreen(
             ) {
                 items(actions, key = { it.id }) { action ->
                     val liveSession = sessions.firstOrNull {
-                        it.actionId == action.id && !it.paneDead
+                        it.actionId == action.id &&
+                            !it.paneDead &&
+                            it.actionExitCode == null
                     }
                     Surface(
                         color = Slate,

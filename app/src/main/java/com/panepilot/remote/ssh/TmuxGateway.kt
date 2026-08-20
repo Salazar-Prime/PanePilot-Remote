@@ -54,7 +54,7 @@ class TmuxGateway(private val ssh: SshConnection) {
 
     fun capture(sessionName: String): PaneSnapshot {
         val tmux = resolveTmux()
-        val target = "=$sessionName:"
+        val target = exactSessionTarget(sessionName)
         val command =
             "${shellQuote(tmux)} display-message -p -t ${shellQuote(target)} " +
                 "${shellQuote("#{pane_title}$FIELD_SEPARATOR#{pane_dead}")} && " +
@@ -88,7 +88,7 @@ class TmuxGateway(private val ssh: SshConnection) {
         require(payload.size <= MAX_MESSAGE_BYTES) { "Messages must be 32 KB or smaller." }
 
         val tmux = resolveTmux()
-        val target = "=$sessionName:"
+        val target = exactSessionTarget(sessionName)
         val bufferName = "panepilot-mobile-${UUID.randomUUID()}"
         val command = buildSendCommand(tmux, target, bufferName)
         val result = ssh.execute(command, stdin = payload, maxOutputBytes = 64 * 1024)
@@ -101,7 +101,7 @@ class TmuxGateway(private val ssh: SshConnection) {
 
     fun sendKey(sessionName: String, key: TerminalKey) {
         val tmux = resolveTmux()
-        val target = "=$sessionName:"
+        val target = exactSessionTarget(sessionName)
         val command =
             "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} " +
                 shellQuote(tmuxKeyName(key))
@@ -157,7 +157,8 @@ class TmuxGateway(private val ssh: SshConnection) {
                 "-c ${shellQuote(projectPath)} ${shellQuote(launchCommand)} && " +
                 "panepilot_action_attempt=0; while [ \"\$panepilot_action_attempt\" -lt 40 ]; do " +
                 "if [ \"\$(${shellQuote(tmux)} show-option -qv -t " +
-                "${shellQuote("=$sessionName")} ${shellQuote("@panepilot_managed")})\" = 1 ]; " +
+                "${shellQuote(exactSessionTarget(sessionName))} " +
+                "${shellQuote("@panepilot_managed")})\" = 1 ]; " +
                 "then exit 0; fi; panepilot_action_attempt=\$((panepilot_action_attempt + 1)); " +
                 "sleep 0.05; done; exit 6"
         val result = ssh.execute(command, timeoutMs = 20_000L, maxOutputBytes = 64 * 1024)
@@ -204,7 +205,8 @@ class TmuxGateway(private val ssh: SshConnection) {
         }
         priorSessions.forEach { (name) ->
                 ssh.execute(
-                    "${shellQuote(tmux)} kill-session -t ${shellQuote("=$name")}",
+                    "${shellQuote(tmux)} kill-session -t " +
+                        shellQuote(exactSessionTarget(name)),
                     maxOutputBytes = 16 * 1024
                 )
         }
@@ -261,6 +263,8 @@ class TmuxGateway(private val ssh: SshConnection) {
                 "-t ${shellQuote(target)} && sleep 0.20 && " +
                 "${shellQuote(tmux)} send-keys -t ${shellQuote(target)} C-m"
 
+        internal fun exactSessionTarget(sessionName: String): String = "=$sessionName:"
+
         internal fun actionLaunchCommand(
             tmux: String,
             terminalId: String,
@@ -297,8 +301,8 @@ class TmuxGateway(private val ssh: SshConnection) {
                 "panepilot_action_status=\$?",
                 "$executable set-option -q -t \"\$TMUX_PANE\" " +
                     shellQuote("@panepilot_action_exit_status") +
-                    " \"\$panepilot_action_status\" || true",
-                "exit \"\$panepilot_action_status\""
+                    " \"\$panepilot_action_status\" || exit \"\$panepilot_action_status\"",
+                "while :; do sleep 3600; done"
             ).joinToString("; ")
         }
 

@@ -191,6 +191,7 @@ class MainActivity : ComponentActivity() {
                                 profile = state.connectedProfile,
                                 connectionOnline = state.connectedProfile?.id in
                                     state.connectedProfileIds,
+                                isReconnecting = state.isReconnecting,
                                 sessions = state.sessions,
                                 selectedSession = state.selectedSession,
                                 transcript = state.transcript,
@@ -199,6 +200,7 @@ class MainActivity : ComponentActivity() {
                                 isRefreshing = state.isBusy,
                                 isSending = state.isSending,
                                 onRefresh = appViewModel::refreshSessions,
+                                onReconnect = appViewModel::reconnect,
                                 onShowServers = appViewModel::showServers,
                                 onDisconnect = appViewModel::disconnect,
                                 onOpenSession = appViewModel::openConsole,
